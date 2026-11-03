@@ -46,26 +46,6 @@ services:
       timeout: 5s
       retries: 5
 
-  dragonfly:
-    image: ghcr.io/dragonflydb/dragonfly:v1.38.0
-    expose:
-      - 6379
-    restart: always
-    volumes:
-      - ./prefect/cache:/data
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    command:
-      [
-        "--proactor_threads=2",
-        "--maxmemory=512mb",
-        "--bind=0.0.0.0",
-        "--port=6379",
-      ]
-
   prefect-server:
     build:
       context: ./config/prefect
@@ -73,23 +53,16 @@ services:
     depends_on:
       prefect-metadata:
         condition: service_healthy
-      dragonfly:
-        condition: service_healthy
     ports:
       - "${HOST_IP:-127.0.0.1}:${PREFECT_HOST_IP:-4200}:4200"
     environment:
       PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
       PREFECT_SERVER_API_HOST: 0.0.0.0
       PREFECT_SERVER_UI_API_URL: http://${HOST_IP-127.0.0.1}:4200/api
-      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
-      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
-      PREFECT_REDIS_MESSAGING_HOST: dragonfly
-      PREFECT_REDIS_MESSAGING_PORT: 6379
-      PREFECT_REDIS_MESSAGING_DB: 0
     env_file: .env
     volumes:
       - ./prefect/app:/prefect:z
-    command: prefect server start --no-services
+    command: prefect server start
     healthcheck:
       test:
         [
@@ -103,26 +76,6 @@ services:
       timeout: 10s
       retries: 6
       start_period: 60s
-
-  prefect-services:
-    build:
-      context: ./config/prefect
-      dockerfile: Containerfile
-    working_dir: /prefect
-    depends_on:
-      prefect-server:
-        condition: service_healthy
-    environment:
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
-      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
-      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
-      PREFECT_REDIS_MESSAGING_HOST: dragonfly
-      PREFECT_REDIS_MESSAGING_PORT: 6379
-      PREFECT_REDIS_MESSAGING_DB: 0
-    env_file: .env
-    volumes:
-      - ./prefect/app:/prefect:z
-    command: prefect server services start
 
   prefect-worker:
     build:
