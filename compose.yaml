@@ -1,0 +1,141 @@
+services:
+  garage:
+    image: docker.io/dxflrs/garage:v2.5.0
+    restart: unless-stopped
+    ports:
+      - ${GARAGE_CONN_HOST_PORT:-3900}:3900
+      - ${GARAGE_ADMIN_HOST_PORT:-3903}:3903
+    environment:
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET-garagerpcsecretgaragerpcsecretgaragerpc\
+        secretgaragerpcsecretgara}"
+      GARAGE_ADMIN_SECRET: "${GARAGE_ADMIN_SECRET-superadminsecret}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_SECRET-superadminsecret}"
+      GARAGE_DEFAULT_BUCKET: "${GARAGE_BUCKET-default}"
+      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY-garagedefaultaccesskeygaragedefa}"
+      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY-garagedefaultsecretkeyg\
+        aragedefaultsecretkeygaragedefaultsecretk}"
+    env_file: .env
+    volumes:
+      - ./config/garage.toml:/etc/garage.toml:ro
+    command: /garage server --single-node --default-bucket
+
+  garage-webui:
+    image: docker.io/khairul169/garage-webui:1.1.0
+    restart: unless-stopped
+    ports:
+      - ${GARAGE_WEBUI_HOST_PORT-3909}:3909
+    environment:
+      API_BASE_URL: http://garage:3903
+      S3_ENDPOINT_URL: http://garage:3900
+      API_ADMIN_KEY: ${GARAGE_ADMIN_SECRET-superadminsecret}
+    env_file: .env
+    volumes:
+      - ./config/garage.toml:/etc/garage.toml:ro
+
+  prefect-metadata:
+    image: docker.io/postgres:18.6-alpine3.24
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - ./prefect/metadata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  dragonfly:
+    image: ghcr.io/dragonflydb/dragonfly:v1.38.0
+    expose:
+      - 6379
+    restart: always
+    volumes:
+      - ./prefect/cache:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command:
+      [
+        "--proactor_threads=2",
+        "--maxmemory=512mb",
+        "--bind=0.0.0.0",
+        "--port=6379",
+      ]
+
+  prefect-server:
+    build:
+      context: ./config/prefect
+    working_dir: /prefect
+    depends_on:
+      prefect-metadata:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    ports:
+      - "${HOST_IP:-127.0.0.1}:${PREFECT_HOST_IP:-4200}:4200"
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_SERVER_UI_API_URL: http://${HOST_IP-127.0.0.1}:4200/api
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: dragonfly
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+    env_file: .env
+    volumes:
+      - ./prefect/app:/prefect:z
+    command: prefect server start --no-services
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u;
+            u.urlopen('http://${HOST_IP-127.0.0.1}:4200/api/health', timeout=1)",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+
+  prefect-services:
+    build:
+      context: ./config/prefect
+      dockerfile: Containerfile
+    working_dir: /prefect
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
+      PREFECT_MESSAGING_BROKER: prefect_redis.messaging
+      PREFECT_MESSAGING_CACHE: prefect_redis.messaging
+      PREFECT_REDIS_MESSAGING_HOST: dragonfly
+      PREFECT_REDIS_MESSAGING_PORT: 6379
+      PREFECT_REDIS_MESSAGING_DB: 0
+    env_file: .env
+    volumes:
+      - ./prefect/app:/prefect:z
+    command: prefect server services start
+
+  prefect-worker:
+    build:
+      context: ./config/prefect
+    working_dir: /prefect
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_WORKING_DIR: /prefect
+    env_file: .env
+    volumes:
+      - ./prefect/app:/prefect:z
+    command: prefect worker start --pool local-pool
+    restart: on-failure
