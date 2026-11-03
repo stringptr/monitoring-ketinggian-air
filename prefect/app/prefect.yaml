@@ -1,0 +1,26 @@
+name: hydrology
+prefect-version: 3.9.1
+
+# The flow code is bind-mounted into the worker at /prefect. Point the run's
+# working directory at it so the relative entrypoint resolves; without this,
+# Prefect copies the deployment from a temporary workspace and cannot find the
+# flow file.
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /prefect
+
+deployments:
+  - name: bronze-ingest
+    description: >-
+      Ingest USGS hydrology and Open-Meteo meteorology into the bronze bucket
+      for the three California monitoring stations.
+    entrypoint: flows/pipeline.py:bronze_pipeline
+    parameters:
+      start_date: "2023-01-01"
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0200-pacific
+        cron: "0 2 * * *"
+        timezone: America/Los_Angeles
+        active: true

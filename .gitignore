@@ -1,3 +1,7 @@
 .env*
 !.env.example
 /garage/
+__pycache__/
+*.pyc
+/prefect/data/
+__pycache__

@@ -104,11 +104,17 @@ services:
     depends_on:
       prefect-server:
         condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
     environment:
       PREFECT_API_URL: http://prefect-server:4200/api
       PREFECT_WORKING_DIR: /prefect
+      PYTHONPATH: /prefect
     env_file: .env
     volumes:
       - ./prefect/app:/prefect:z
-    command: prefect worker start --pool local-pool
+    command: >
+      sh -c "prefect work-pool create local-pool --type process || true;
+             prefect --no-prompt deploy --all &&
+             exec prefect worker start --pool local-pool"
     restart: on-failure
