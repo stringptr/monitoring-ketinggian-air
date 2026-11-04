@@ -10,14 +10,21 @@ services:
         secretgaragerpcsecretgara}"
       GARAGE_ADMIN_SECRET: "${GARAGE_ADMIN_SECRET-superadminsecret}"
       GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_SECRET-superadminsecret}"
-      GARAGE_DEFAULT_BUCKET: "${GARAGE_BUCKET-default}"
       GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY-garagedefaultaccesskeygaragedefa}"
       GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY-garagedefaultsecretkeyg\
         aragedefaultsecretkeygaragedefaultsecretk}"
     env_file: .env
     volumes:
       - ./config/garage.toml:/etc/garage.toml:ro
-    command: /garage server --single-node --default-bucket
+      - ./garage/meta:/var/lib/garage/meta
+      - ./garage/data:/var/lib/garage/data
+    command: /garage server --single-node --default-access-key
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   garage-webui:
     image: docker.io/khairul169/garage-webui:1.1.0
@@ -31,6 +38,19 @@ services:
     env_file: .env
     volumes:
       - ./config/garage.toml:/etc/garage.toml:ro
+
+  garage-init:
+    build:
+      context: ./config/garage-init
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_SECRET-superadminsecret}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY-garagedefaultaccesskeygaragedefa}
+      GARAGE_BUCKETS: ${GARAGE_BUCKETS:-bronze silver gold}
+    env_file: .env
+    restart: "no"
 
   prefect-metadata:
     image: docker.io/postgres:18.6-alpine3.24
