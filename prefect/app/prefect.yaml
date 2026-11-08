@@ -12,8 +12,9 @@ pull:
 deployments:
   - name: bronze-ingest
     description: >-
-      Ingest USGS hydrology and Open-Meteo meteorology into the bronze bucket
-      for the three California monitoring stations.
+      Ingest raw USGS hydrology and Open-Meteo meteorology JSON into the bronze
+      bucket for the three California monitoring stations. The first run loads
+      full history; later runs fetch only the last 7 days.
     entrypoint: flows/pipeline.py:bronze_pipeline
     parameters:
       start_date: "2023-01-01"

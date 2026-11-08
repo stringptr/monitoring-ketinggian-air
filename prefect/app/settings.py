@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 DEFAULT_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
+TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -15,6 +17,10 @@ def _env(name: str, default: str | None = None) -> str | None:
 
     value = os.getenv(name)
     return value if value not in (None, "") else default
+
+
+def _today() -> str:
+    return datetime.now(TIMEZONE).date().isoformat()
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,7 @@ def get_settings(
 
     return Settings(
         start_date=start_date or _env("HYDROLOGY_START_DATE", DEFAULT_START_DATE),
-        end_date=end_date or _env("HYDROLOGY_END_DATE") or date.today().isoformat(),
+        end_date=end_date or _env("HYDROLOGY_END_DATE") or _today(),
         usgs_api_key=_env("USGS_API_KEY"),
         s3_endpoint_url=_env("S3_ENDPOINT_URL"),
         s3_region=_env("S3_REGION", "garage"),

@@ -1,19 +1,23 @@
-"""Open-Meteo ingestion flow.
+"""Open-Meteo meteorology ingestion flow.
 
-Refactor of ``penarikan.py`` into a parameterised Prefect flow. The original
-hardcoded Indonesian coordinates and the ``Asia/Bangkok`` timezone; here the
-location is taken from the USGS station registry and every station uses
-``America/Los_Angeles``.
+Fetches the raw JSON archive response for each station and lands it in bronze
+verbatim (no column renames, no metadata columns). The first run per station
+fetches the full history from ``HYDROLOGY_START_DATE``; once an
+``ingest_date=*`` partition exists only the rolling last 7 days are fetched.
 """
 
 from __future__ import annotations
 
-import pandas as pd
 import requests
 from prefect import flow, get_run_logger, task
 
-from datalake import write_bronze
-from settings import get_settings
+from datalake import (
+    incremental_start,
+    open_meteo_prefix,
+    partition_exists,
+    write_payload,
+)
+from settings import Settings, get_settings
 from stations import Station, get_stations
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -36,22 +40,25 @@ HOURLY_VARIABLES: tuple[str, ...] = (
 
 
 @task(retries=3, retry_delay_seconds=30, log_prints=True)
-def fetch_station_weather(
-    station: Station, start_date: str, end_date: str
-) -> pd.DataFrame:
-    """Fetch the hourly weather archive for a single station.
+def ingest_station_weather(
+    station: Station, settings: Settings, ingest_date: str
+) -> str:
+    """Fetch and store the raw Open-Meteo JSON for a single station."""
 
-    Errors are raised (not swallowed) so Prefect can surface a failed task and
-    apply the configured retries.
-    """
+    prefix = open_meteo_prefix(station.site_no)
+    if partition_exists(settings, prefix):
+        start_date = incremental_start(ingest_date)
+    else:
+        start_date = settings.start_date
 
     params = {
         "latitude": station.latitude,
         "longitude": station.longitude,
         "start_date": start_date,
-        "end_date": end_date,
+        "end_date": settings.end_date,
         "hourly": ",".join(HOURLY_VARIABLES),
         "timezone": station.timezone,
+        "format": "json",
     }
 
     response = requests.get(ARCHIVE_URL, params=params, timeout=120)
@@ -61,62 +68,38 @@ def fetch_station_weather(
     hourly = payload.get("hourly")
     if not hourly or "time" not in hourly:
         raise ValueError(
-            f"Open-Meteo returned no hourly data for {station.id} "
-            f"({start_date}..{end_date}): {payload.get('reason', payload)}"
+            f"Open-Meteo returned no hourly data for {station.site_no} "
+            f"({start_date}..{settings.end_date}): "
+            f"{payload.get('reason', payload)}"
         )
 
-    frame = pd.DataFrame(hourly)
-    frame["time"] = pd.to_datetime(frame["time"])
-    frame["station_id"] = station.id
-    frame["source"] = "open_meteo"
-    frame["ingested_at"] = pd.Timestamp.utcnow()
-
-    return frame
-
-
-@task(retries=3, retry_delay_seconds=30, log_prints=True)
-def store_station_weather(
-    frame: pd.DataFrame, station: Station, start_date: str, end_date: str
-) -> list[str]:
-    settings = get_settings(start_date, end_date)
-    return write_bronze(
-        frame,
-        dataset="open_meteo",
-        station=station.site_no,
-        settings=settings,
-        time_column="time",
+    location = write_payload(settings, prefix, ingest_date, payload)
+    print(
+        f"open-meteo {station.site_no}: {len(hourly['time'])} hour(s) "
+        f"({start_date}..{settings.end_date}) -> {location}"
     )
+    return location
 
 
 @flow(name="ingest-open-meteo", log_prints=True)
 def ingest_open_meteo(
     start_date: str | None = None, end_date: str | None = None
 ) -> list[str]:
-    """Ingest hourly Open-Meteo meteorology for every active station."""
+    """Ingest raw Open-Meteo JSON for every active station."""
 
     logger = get_run_logger()
     settings = get_settings(start_date, end_date)
+    ingest_date = settings.end_date
     stations = get_stations()
 
     logger.info(
-        "Ingesting Open-Meteo %s..%s for %d station(s)",
-        settings.start_date,
-        settings.end_date,
+        "Ingesting Open-Meteo into bronze for %d station(s), ingest_date=%s",
         len(stations),
+        ingest_date,
     )
 
     written: list[str] = []
     for station in stations:
-        frame = fetch_station_weather(station, settings.start_date, settings.end_date)
-        locations = store_station_weather(
-            frame, station, settings.start_date, settings.end_date
-        )
-        logger.info(
-            "open_meteo %s: %d rows -> %s",
-            station.site_no,
-            len(frame),
-            ", ".join(locations),
-        )
-        written.extend(locations)
+        written.append(ingest_station_weather(station, settings, ingest_date))
 
     return written
