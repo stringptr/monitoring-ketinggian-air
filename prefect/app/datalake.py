@@ -6,19 +6,21 @@ renames, no metadata columns). Partitions use the bare-value hierarchy:
 * USGS: ``usgs/{daily|continuous}/parameter_code={code}/station_id={id}``
 * Open-Meteo: ``open-meteo/station_id={id}``
 
-Each ingestion run appends one ``ingest_date=YYYY-MM-DD`` partition containing a
-single ``part-000.json``. Writes overwrite an existing file, so re-running the
-same day is idempotent. When ``S3_ENDPOINT_URL`` is configured the partitions
-are uploaded to the S3-compatible object store (Garage); otherwise they fall
-back to a local directory so the flows stay runnable without the storage
-backend.
+Every calendar day is stored as its own ``ingest_date=YYYY-MM-DD`` partition
+containing a single ``part-000.json``. All dates are UTC. Writing a partition
+is idempotent: existing files are skipped so a backfill can be stopped and
+resumed later.
+
+When ``S3_ENDPOINT_URL`` is configured the partitions are uploaded to the
+S3-compatible object store (Garage); otherwise they fall back to a local
+directory so the flows stay runnable without the storage backend.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from settings import Settings
@@ -27,10 +29,47 @@ PARTITION_PREFIX = "ingest_date="
 PART_FILE = "part-000.json"
 
 
-def incremental_start(today_iso: str) -> str:
-    """Return the start date for an incremental fetch (last 7 days)."""
+def date_range(start: str, end: str):
+    """Yield every ISO date from ``start`` to ``end`` (inclusive)."""
 
-    return (datetime.fromisoformat(today_iso).date() - timedelta(days=7)).isoformat()
+    cursor = date.fromisoformat(start)
+    stop = date.fromisoformat(end)
+    while cursor <= stop:
+        yield cursor.isoformat()
+        cursor += timedelta(days=1)
+
+
+def contiguous_runs(dates):
+    """Yield ``(start, end)`` tuples for runs of consecutive ISO dates."""
+
+    ordered = sorted(dates)
+    if not ordered:
+        return
+
+    run_start = run_end = date.fromisoformat(ordered[0])
+    for raw in ordered[1:]:
+        current = date.fromisoformat(raw)
+        if current == run_end + timedelta(days=1):
+            run_end = current
+            continue
+        yield run_start.isoformat(), run_end.isoformat()
+        run_start = run_end = current
+    yield run_start.isoformat(), run_end.isoformat()
+
+
+def year_chunks(start: str, end: str):
+    """Yield calendar-year windows covering ``start..end``.
+
+    The USGS ``continuous`` collection rejects ranges longer than 1100 days, so
+    yearly windows keep every request safely below that limit.
+    """
+
+    cursor = date.fromisoformat(start)
+    stop = date.fromisoformat(end)
+    while cursor <= stop:
+        chunk_end = min(date(cursor.year, 12, 31), stop)
+        yield cursor.isoformat(), chunk_end.isoformat()
+        cursor = chunk_end + timedelta(days=1)
 
 
 def usgs_prefix(station_site_no: str, data_type: str, parameter_code: str) -> str:
@@ -66,36 +105,50 @@ def _storage_options(settings: Settings) -> dict:
     }
 
 
+_FILESYSTEMS: dict[tuple, object] = {}
+
+
 def _s3_filesystem(settings: Settings):
     import s3fs
 
-    return s3fs.S3FileSystem(**_storage_options(settings))
+    cache_key = (
+        settings.s3_endpoint_url,
+        settings.s3_region,
+        os.getenv("GARAGE_DEFAULT_ACCESS_KEY"),
+        os.getenv("GARAGE_DEFAULT_SECRET_KEY"),
+    )
+    filesystem = _FILESYSTEMS.get(cache_key)
+    if filesystem is None:
+        filesystem = s3fs.S3FileSystem(**_storage_options(settings))
+        _FILESYSTEMS[cache_key] = filesystem
+    return filesystem
 
 
-def partition_exists(settings: Settings, prefix: str) -> bool:
-    """Return ``True`` when any ``ingest_date=*`` partition exists below prefix.
+def _partition_dates_from_names(names) -> set[str]:
+    dates: set[str] = set()
+    for name in names:
+        if name.startswith(PARTITION_PREFIX):
+            dates.add(name[len(PARTITION_PREFIX) :])
+    return dates
 
-    Existing data means the historical load already happened, so the next run
-    only needs the rolling 7-day window.
-    """
+
+def existing_dates(settings: Settings, prefix: str) -> set[str]:
+    """Return the set of ``ingest_date`` values that already have a part file."""
 
     if settings.s3_endpoint_url:
         filesystem = _s3_filesystem(settings)
-        base = f"{settings.s3_bucket_bronze}/{prefix}"
-        try:
-            entries = filesystem.ls(base, detail=False)
-        except FileNotFoundError:
-            return False
-        return any(
-            Path(entry).name.startswith(PARTITION_PREFIX) for entry in entries
+        pattern = (
+            f"{settings.s3_bucket_bronze}/{prefix}/"
+            f"{PARTITION_PREFIX}*/{PART_FILE}"
         )
+        paths = filesystem.glob(pattern)
+        return _partition_dates_from_names(Path(path).parts[-2] for path in paths)
 
     base_path = Path(settings.local_output_dir) / "bronze" / prefix
     if not base_path.is_dir():
-        return False
-    return any(
-        entry.name.startswith(PARTITION_PREFIX) for entry in base_path.iterdir()
-    )
+        return set()
+    paths = base_path.glob(f"{PARTITION_PREFIX}*/{PART_FILE}")
+    return _partition_dates_from_names(path.parent.name for path in paths)
 
 
 def write_payload(

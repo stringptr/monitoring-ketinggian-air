@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 DEFAULT_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
-TIMEZONE = ZoneInfo("America/Los_Angeles")
+DEFAULT_EMPTY_GRACE_DAYS = 3
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -19,8 +18,8 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
-def _today() -> str:
-    return datetime.now(TIMEZONE).date().isoformat()
+def _today_utc() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 @dataclass(frozen=True)
@@ -32,6 +31,7 @@ class Settings:
     s3_region: str
     s3_bucket_bronze: str
     local_output_dir: str
+    empty_grace_days: int
 
 
 def get_settings(
@@ -42,10 +42,13 @@ def get_settings(
 
     return Settings(
         start_date=start_date or _env("HYDROLOGY_START_DATE", DEFAULT_START_DATE),
-        end_date=end_date or _env("HYDROLOGY_END_DATE") or _today(),
+        end_date=end_date or _env("HYDROLOGY_END_DATE") or _today_utc(),
         usgs_api_key=_env("USGS_API_KEY"),
         s3_endpoint_url=_env("S3_ENDPOINT_URL"),
         s3_region=_env("S3_REGION", "garage"),
         s3_bucket_bronze=_env("S3_BUCKET_BRONZE", "bronze"),
         local_output_dir=_env("BRONZE_LOCAL_DIR", DEFAULT_LOCAL_DIR),
+        empty_grace_days=int(
+            _env("EMPTY_GRACE_DAYS", str(DEFAULT_EMPTY_GRACE_DAYS))
+        ),
     )

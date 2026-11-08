@@ -1,22 +1,31 @@
 """Open-Meteo meteorology ingestion flow.
 
 Fetches the raw JSON archive response for each station and lands it in bronze
-verbatim (no column renames, no metadata columns). The first run per station
-fetches the full history from ``HYDROLOGY_START_DATE``; once an
-``ingest_date=*`` partition exists only the rolling last 7 days are fetched.
+verbatim (no column renames, no metadata columns). Data is partitioned by
+observation day (UTC): every date from ``HYDROLOGY_START_DATE`` (default
+``2023-01-01``) through today gets its own ``ingest_date=YYYY-MM-DD``
+partition. Existing partitions are skipped, so a long backfill can be stopped
+and resumed without repeating completed days.
+
+Missing dates are fetched in calendar-year batches and split into one file per
+day. Requests are throttled to the documented Open-Meteo quota.
 """
 
 from __future__ import annotations
 
-import requests
+from datetime import date, timedelta
+
 from prefect import flow, get_run_logger, task
 
 from datalake import (
-    incremental_start,
+    contiguous_runs,
+    date_range,
+    existing_dates,
     open_meteo_prefix,
-    partition_exists,
     write_payload,
+    year_chunks,
 )
+from ratelimit import OPEN_METEO_LIMITER, get_json
 from settings import Settings, get_settings
 from stations import Station, get_stations
 
@@ -39,46 +48,118 @@ HOURLY_VARIABLES: tuple[str, ...] = (
 )
 
 
-@task(retries=3, retry_delay_seconds=30, log_prints=True)
-def ingest_station_weather(
-    station: Station, settings: Settings, ingest_date: str
-) -> str:
-    """Fetch and store the raw Open-Meteo JSON for a single station."""
+def fetch_chunk(
+    station: Station, start_date: str, end_date: str
+) -> tuple[dict, list[str]]:
+    """Fetch one (<= 1 year) window and return ``(payload, variable_keys)``."""
 
-    prefix = open_meteo_prefix(station.site_no)
-    if partition_exists(settings, prefix):
-        start_date = incremental_start(ingest_date)
-    else:
-        start_date = settings.start_date
-
-    params = {
-        "latitude": station.latitude,
-        "longitude": station.longitude,
-        "start_date": start_date,
-        "end_date": settings.end_date,
-        "hourly": ",".join(HOURLY_VARIABLES),
-        "timezone": station.timezone,
-        "format": "json",
-    }
-
-    response = requests.get(ARCHIVE_URL, params=params, timeout=120)
-    response.raise_for_status()
-    payload = response.json()
+    payload = get_json(
+        OPEN_METEO_LIMITER,
+        ARCHIVE_URL,
+        params={
+            "latitude": station.latitude,
+            "longitude": station.longitude,
+            "start_date": start_date,
+            "end_date": end_date,
+            "hourly": ",".join(HOURLY_VARIABLES),
+            "timezone": "UTC",
+            "format": "json",
+        },
+    )
 
     hourly = payload.get("hourly")
     if not hourly or "time" not in hourly:
         raise ValueError(
             f"Open-Meteo returned no hourly data for {station.site_no} "
-            f"({start_date}..{settings.end_date}): "
-            f"{payload.get('reason', payload)}"
+            f"({start_date}..{end_date}): {payload.get('reason', payload)}"
         )
 
-    location = write_payload(settings, prefix, ingest_date, payload)
+    variable_keys = [key for key in hourly if key != "time"]
+    return payload, variable_keys
+
+
+def split_hourly_by_date(
+    payload: dict, variable_keys: list[str]
+) -> dict[str, dict]:
+    """Slice a multi-day hourly payload into per-day ``hourly`` objects."""
+
+    hourly = payload["hourly"]
+    times = hourly["time"]
+
+    buckets: dict[str, list[int]] = {}
+    for index, timestamp in enumerate(times):
+        buckets.setdefault(timestamp[:10], []).append(index)
+
+    grouped: dict[str, dict] = {}
+    for day, indices in buckets.items():
+        day_hourly: dict[str, list] = {"time": [times[index] for index in indices]}
+        for key in variable_keys:
+            values = hourly.get(key) or []
+            day_hourly[key] = [values[index] for index in indices]
+        grouped[day] = day_hourly
+    return grouped
+
+
+def _day_payload(payload: dict, hourly: dict) -> dict:
+    day_payload = {key: value for key, value in payload.items() if key != "hourly"}
+    day_payload["hourly"] = hourly
+    return day_payload
+
+
+@task(retries=3, retry_delay_seconds=30, log_prints=True)
+def ingest_station_weather(station: Station, settings: Settings) -> list[str]:
+    """Fetch every missing day of Open-Meteo data for a single station."""
+
+    prefix = open_meteo_prefix(station.site_no)
+    existing = existing_dates(settings, prefix)
+    missing = [
+        day
+        for day in date_range(settings.start_date, settings.end_date)
+        if day not in existing
+    ]
+
+    label = f"open-meteo {station.site_no}"
+    if not missing:
+        print(f"{label}: up to date (nothing to fetch)")
+        return []
+
+    missing_set = set(missing)
+    grace_cutoff = (
+        date.fromisoformat(settings.end_date)
+        - timedelta(days=settings.empty_grace_days)
+    ).isoformat()
+
+    written: list[str] = []
+    for run_start, run_end in contiguous_runs(missing):
+        for chunk_start, chunk_end in year_chunks(run_start, run_end):
+            payload, variable_keys = fetch_chunk(station, chunk_start, chunk_end)
+            grouped = split_hourly_by_date(payload, variable_keys)
+
+            for day in date_range(chunk_start, chunk_end):
+                if day not in missing_set:
+                    continue
+
+                hourly = grouped.get(day)
+                if not hourly and day > grace_cutoff:
+                    # Recent days may not be published yet; retry next run.
+                    continue
+                if hourly is None:
+                    hourly = {
+                        "time": [],
+                        **{key: [] for key in variable_keys},
+                    }
+
+                written.append(
+                    write_payload(
+                        settings, prefix, day, _day_payload(payload, hourly)
+                    )
+                )
+
     print(
-        f"open-meteo {station.site_no}: {len(hourly['time'])} hour(s) "
-        f"({start_date}..{settings.end_date}) -> {location}"
+        f"{label}: wrote {len(written)} day partition(s) "
+        f"({len(missing)} missing, {len(existing)} existing)"
     )
-    return location
+    return written
 
 
 @flow(name="ingest-open-meteo", log_prints=True)
@@ -89,17 +170,17 @@ def ingest_open_meteo(
 
     logger = get_run_logger()
     settings = get_settings(start_date, end_date)
-    ingest_date = settings.end_date
     stations = get_stations()
 
     logger.info(
-        "Ingesting Open-Meteo into bronze for %d station(s), ingest_date=%s",
+        "Ingesting Open-Meteo into bronze for %d station(s), %s..%s (UTC)",
         len(stations),
-        ingest_date,
+        settings.start_date,
+        settings.end_date,
     )
 
     written: list[str] = []
     for station in stations:
-        written.append(ingest_station_weather(station, settings, ingest_date))
+        written.extend(ingest_station_weather(station, settings))
 
     return written

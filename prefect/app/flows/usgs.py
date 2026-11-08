@@ -6,26 +6,31 @@ bronze bucket without any transformation:
 * ``00060`` (discharge) is ingested from the ``daily`` collection.
 * ``00065`` (gage height) is ingested from the ``continuous`` collection.
 
-The first run for a station/parameter fetches the full history from
-``HYDROLOGY_START_DATE`` (default ``2023-01-01``). Once an ``ingest_date=*``
-partition exists, only the rolling last 7 days are fetched. Long ranges are
-downloaded in calendar-year chunks (the API caps the continuous collection at
-1100 days) and every chunk/page is merged into a single ``part-000.json``.
+Data is partitioned by observation day (UTC): every date from
+``HYDROLOGY_START_DATE`` (default ``2023-01-01``) through today gets its own
+``ingest_date=YYYY-MM-DD/part-000.json``. Existing partitions are skipped, so a
+long backfill can be stopped and resumed without repeating completed days.
+
+Missing dates are fetched in batches: contiguous ranges are downloaded in
+calendar-year chunks (the API caps the continuous collection at 1100 days) and
+split into one file per day. Requests are throttled to the documented quota.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 
-import requests
 from prefect import flow, get_run_logger, task
 
 from datalake import (
-    incremental_start,
-    partition_exists,
+    contiguous_runs,
+    date_range,
+    existing_dates,
     usgs_prefix,
     write_payload,
+    year_chunks,
 )
+from ratelimit import USGS_LIMITER, get_json
 from settings import Settings, get_settings
 from stations import Station, get_stations
 
@@ -53,11 +58,7 @@ def _next_link(payload: dict) -> str | None:
 
 
 def fetch_collection(url: str, params: dict, api_key: str) -> dict:
-    """Fetch every page of an OGC API collection and merge the features.
-
-    The returned object keeps the source FeatureCollection envelope (minus the
-    now-stale pagination links) with all features concatenated in order.
-    """
+    """Fetch every page of an OGC API collection and merge the features."""
 
     headers = {"X-Api-Key": api_key}
     features: list[dict] = []
@@ -72,11 +73,9 @@ def fetch_collection(url: str, params: dict, api_key: str) -> dict:
         if pages > MAX_PAGES:
             raise RuntimeError(f"Pagination exceeded {MAX_PAGES} pages for {url}")
 
-        response = requests.get(
-            next_url, params=next_params, headers=headers, timeout=180
+        payload = get_json(
+            USGS_LIMITER, next_url, params=next_params, headers=headers
         )
-        response.raise_for_status()
-        payload = response.json()
 
         if merged is None:
             merged = {key: value for key, value in payload.items() if key != "links"}
@@ -88,72 +87,6 @@ def fetch_collection(url: str, params: dict, api_key: str) -> dict:
     if merged is None:
         merged = {"type": "FeatureCollection", "features": []}
 
-    merged["type"] = "FeatureCollection"
-    merged["features"] = features
-    merged["numberReturned"] = len(features)
-    merged.pop("links", None)
-    return merged
-
-
-def _chunks(start_date: str, end_date: str):
-    """Yield non-overlapping calendar-year windows covering the range."""
-
-    cursor = date.fromisoformat(start_date)
-    end = date.fromisoformat(end_date)
-    while cursor <= end:
-        chunk_end = min(date(cursor.year, 12, 31), end)
-        yield cursor.isoformat(), chunk_end.isoformat()
-        cursor = chunk_end + timedelta(days=1)
-
-
-def _feature_key(feature: dict) -> str:
-    properties = feature.get("properties", {})
-    return (
-        feature.get("id")
-        or f"{properties.get('time_series_id')}|{properties.get('time')}"
-        f"|{properties.get('statistic_id')}"
-    )
-
-
-def fetch_range(
-    collection_url: str,
-    base_params: dict,
-    api_key: str,
-    start_date: str,
-    end_date: str,
-) -> dict:
-    """Fetch ``start_date..end_date`` in year chunks and merge into one payload.
-
-    Features are de-duplicated (adjacent windows never overlap, but the API can
-    be inconsistent) and sorted chronologically before being returned.
-    """
-
-    merged: dict | None = None
-    features: list[dict] = []
-    seen: set[str] = set()
-
-    for chunk_start, chunk_end in _chunks(start_date, end_date):
-        params = dict(base_params)
-        params["datetime"] = f"{chunk_start}/{chunk_end}"
-        payload = fetch_collection(collection_url, params, api_key)
-
-        if merged is None:
-            merged = {
-                key: value
-                for key, value in payload.items()
-                if key not in ("features", "numberReturned")
-            }
-
-        for feature in payload.get("features", []):
-            key = _feature_key(feature)
-            if key in seen:
-                continue
-            seen.add(key)
-            features.append(feature)
-
-    if merged is None:
-        merged = {"type": "FeatureCollection"}
-
     features.sort(key=lambda feature: feature.get("properties", {}).get("time", ""))
 
     merged["type"] = "FeatureCollection"
@@ -163,6 +96,53 @@ def fetch_range(
     return merged
 
 
+def fetch_chunk(
+    collection_url: str,
+    base_params: dict,
+    api_key: str,
+    start_date: str,
+    end_date: str,
+) -> dict:
+    """Fetch a single (<= 1 year) date window."""
+
+    params = dict(base_params)
+    params["datetime"] = f"{start_date}/{end_date}"
+    return fetch_collection(collection_url, params, api_key)
+
+
+def split_features_by_date(features: list[dict]) -> dict[str, list[dict]]:
+    """Group raw features by the UTC date in ``properties.time``."""
+
+    grouped: dict[str, list[dict]] = {}
+    seen: set[str] = set()
+
+    for feature in features:
+        properties = feature.get("properties", {})
+        timestamp = properties.get("time") or ""
+        day = timestamp[:10]
+        if not day:
+            continue
+
+        key = feature.get("id") or (
+            f"{properties.get('time_series_id')}|{timestamp}"
+            f"|{properties.get('statistic_id')}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped.setdefault(day, []).append(feature)
+
+    for day_features in grouped.values():
+        day_features.sort(
+            key=lambda feature: feature.get("properties", {}).get("time", "")
+        )
+    return grouped
+
+
+def _empty_collection() -> dict:
+    return {"type": "FeatureCollection", "features": [], "numberReturned": 0}
+
+
 @task(retries=3, retry_delay_seconds=30, log_prints=True)
 def ingest_usgs_parameter(
     station: Station,
@@ -170,39 +150,71 @@ def ingest_usgs_parameter(
     parameter_code: str,
     collection_url: str,
     settings: Settings,
-    ingest_date: str,
-) -> str:
-    """Ingest one USGS parameter for one station into a bronze partition."""
+) -> list[str]:
+    """Fetch every missing day for one USGS parameter/station."""
 
     if not settings.usgs_api_key:
         raise ValueError("USGS_API_KEY is not set")
 
     prefix = usgs_prefix(station.site_no, data_type, parameter_code)
-    if partition_exists(settings, prefix):
-        start_date = incremental_start(ingest_date)
-    else:
-        start_date = settings.start_date
+    existing = existing_dates(settings, prefix)
+    missing = [
+        day
+        for day in date_range(settings.start_date, settings.end_date)
+        if day not in existing
+    ]
 
-    payload = fetch_range(
-        collection_url,
-        {
-            "monitoring_location_id": station.id,
-            "parameter_code": parameter_code,
-            "limit": PAGE_LIMIT,
-            "f": "json",
-        },
-        settings.usgs_api_key,
-        start_date,
-        settings.end_date,
-    )
+    label = f"usgs {data_type}/{parameter_code} {station.site_no}"
+    if not missing:
+        print(f"{label}: up to date (nothing to fetch)")
+        return []
 
-    location = write_payload(settings, prefix, ingest_date, payload)
+    missing_set = set(missing)
+    grace_cutoff = (
+        date.fromisoformat(settings.end_date)
+        - timedelta(days=settings.empty_grace_days)
+    ).isoformat()
+
+    base_params = {
+        "monitoring_location_id": station.id,
+        "parameter_code": parameter_code,
+        "limit": PAGE_LIMIT,
+        "f": "json",
+    }
+
+    written: list[str] = []
+    for run_start, run_end in contiguous_runs(missing):
+        for chunk_start, chunk_end in year_chunks(run_start, run_end):
+            payload = fetch_chunk(
+                collection_url,
+                base_params,
+                settings.usgs_api_key,
+                chunk_start,
+                chunk_end,
+            )
+            grouped = split_features_by_date(payload.get("features", []))
+
+            for day in date_range(chunk_start, chunk_end):
+                if day not in missing_set:
+                    continue
+
+                features = grouped.get(day, [])
+                if not features and day > grace_cutoff:
+                    # Recent days may not be published yet; retry next run.
+                    continue
+
+                day_payload = {
+                    "type": "FeatureCollection",
+                    "features": features,
+                    "numberReturned": len(features),
+                }
+                written.append(write_payload(settings, prefix, day, day_payload))
+
     print(
-        f"usgs {data_type}/{parameter_code} {station.site_no}: "
-        f"{payload['numberReturned']} feature(s) "
-        f"({start_date}..{settings.end_date}) -> {location}"
+        f"{label}: wrote {len(written)} day partition(s) "
+        f"({len(missing)} missing, {len(existing)} existing)"
     )
-    return location
+    return written
 
 
 @flow(name="ingest-usgs", log_prints=True)
@@ -213,26 +225,25 @@ def ingest_usgs(
 
     logger = get_run_logger()
     settings = get_settings(start_date, end_date)
-    ingest_date = settings.end_date
     stations = get_stations()
 
     logger.info(
-        "Ingesting USGS into bronze for %d station(s), ingest_date=%s",
+        "Ingesting USGS into bronze for %d station(s), %s..%s (UTC)",
         len(stations),
-        ingest_date,
+        settings.start_date,
+        settings.end_date,
     )
 
     written: list[str] = []
     for station in stations:
         for data_type, parameter_code, collection_url in USGS_PARAMETERS:
-            written.append(
+            written.extend(
                 ingest_usgs_parameter(
                     station,
                     data_type,
                     parameter_code,
                     collection_url,
                     settings,
-                    ingest_date,
                 )
             )
 

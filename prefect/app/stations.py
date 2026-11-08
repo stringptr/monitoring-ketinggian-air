@@ -1,16 +1,14 @@
 """USGS monitoring locations used by the hydrology pipeline.
 
 Coordinates are the official NAD83 decimal lat/lon published by the USGS Site
-Service for each monitoring location. Every station in this project is in
-California and shares the ``America/Los_Angeles`` timezone.
+Service for each monitoring location. Every timestamp handled by the pipeline
+is UTC.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-
-DEFAULT_TIMEZONE = "America/Los_Angeles"
 
 
 @dataclass(frozen=True)
@@ -25,7 +23,6 @@ class Station:
     name: str
     latitude: float
     longitude: float
-    timezone: str = DEFAULT_TIMEZONE
 
 
 STATIONS: tuple[Station, ...] = (
