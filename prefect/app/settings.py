@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 DEFAULT_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
 DEFAULT_EMPTY_GRACE_DAYS = 3
+DEFAULT_LOOKBACK_DAYS = 7
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -32,6 +33,7 @@ class Settings:
     s3_bucket_bronze: str
     local_output_dir: str
     empty_grace_days: int
+    lookback_days: int
 
 
 def get_settings(
@@ -51,4 +53,5 @@ def get_settings(
         empty_grace_days=int(
             _env("EMPTY_GRACE_DAYS", str(DEFAULT_EMPTY_GRACE_DAYS))
         ),
+        lookback_days=int(_env("LOOKBACK_DAYS", str(DEFAULT_LOOKBACK_DAYS))),
     )

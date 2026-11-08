@@ -4,8 +4,9 @@ Fetches the raw JSON archive response for each station and lands it in bronze
 verbatim (no column renames, no metadata columns). Data is partitioned by
 observation day (UTC): every date from ``HYDROLOGY_START_DATE`` (default
 ``2023-01-01``) through today gets its own ``ingest_date=YYYY-MM-DD``
-partition. Existing partitions are skipped, so a long backfill can be stopped
-and resumed without repeating completed days.
+partition. Each file contains that day plus the previous ``LOOKBACK_DAYS``
+days (default 7). Existing partitions are skipped, so a long backfill can be
+stopped and resumed without repeating completed days.
 
 Missing dates are fetched in calendar-year batches and split into one file per
 day. Requests are throttled to the documented Open-Meteo quota.
@@ -22,6 +23,7 @@ from datalake import (
     date_range,
     existing_dates,
     open_meteo_prefix,
+    window_start,
     write_payload,
     year_chunks,
 )
@@ -130,25 +132,35 @@ def ingest_station_weather(station: Station, settings: Settings) -> list[str]:
     ).isoformat()
 
     written: list[str] = []
+    lookback = settings.lookback_days
     for run_start, run_end in contiguous_runs(missing):
         for chunk_start, chunk_end in year_chunks(run_start, run_end):
-            payload, variable_keys = fetch_chunk(station, chunk_start, chunk_end)
+            # Fetch a lookback lead-in so each day's window is complete even
+            # across year boundaries.
+            fetch_start = window_start(chunk_start, settings.start_date, lookback)
+            payload, variable_keys = fetch_chunk(station, fetch_start, chunk_end)
             grouped = split_hourly_by_date(payload, variable_keys)
 
             for day in date_range(chunk_start, chunk_end):
                 if day not in missing_set:
                     continue
 
-                hourly = grouped.get(day)
-                if not hourly and day > grace_cutoff:
+                first_day = window_start(day, settings.start_date, lookback)
+                combined_time: list[str] = []
+                combined: dict[str, list] = {key: [] for key in variable_keys}
+                for window_day in date_range(first_day, day):
+                    hourly = grouped.get(window_day)
+                    if not hourly:
+                        continue
+                    combined_time.extend(hourly["time"])
+                    for key in variable_keys:
+                        combined[key].extend(hourly[key])
+
+                if not combined_time and day > grace_cutoff:
                     # Recent days may not be published yet; retry next run.
                     continue
-                if hourly is None:
-                    hourly = {
-                        "time": [],
-                        **{key: [] for key in variable_keys},
-                    }
 
+                hourly = {"time": combined_time, **combined}
                 written.append(
                     write_payload(
                         settings, prefix, day, _day_payload(payload, hourly)

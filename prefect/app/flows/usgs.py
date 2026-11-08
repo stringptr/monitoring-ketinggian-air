@@ -8,8 +8,9 @@ bronze bucket without any transformation:
 
 Data is partitioned by observation day (UTC): every date from
 ``HYDROLOGY_START_DATE`` (default ``2023-01-01``) through today gets its own
-``ingest_date=YYYY-MM-DD/part-000.json``. Existing partitions are skipped, so a
-long backfill can be stopped and resumed without repeating completed days.
+``ingest_date=YYYY-MM-DD/part-000.json``. Each file contains that day plus the
+previous ``LOOKBACK_DAYS`` days (default 7). Existing partitions are skipped,
+so a long backfill can be stopped and resumed without repeating completed days.
 
 Missing dates are fetched in batches: contiguous ranges are downloaded in
 calendar-year chunks (the API caps the continuous collection at 1100 days) and
@@ -27,6 +28,7 @@ from datalake import (
     date_range,
     existing_dates,
     usgs_prefix,
+    window_start,
     write_payload,
     year_chunks,
 )
@@ -103,10 +105,18 @@ def fetch_chunk(
     start_date: str,
     end_date: str,
 ) -> dict:
-    """Fetch a single (<= 1 year) date window."""
+    """Fetch a single (<= 1 year) date window.
 
+    The ``continuous`` collection treats the end date as exclusive (it only
+    returns the midnight sample), so one extra day is requested to capture the
+    complete final day. The caller filters out anything past ``end_date``.
+    """
+
+    request_end = (
+        date.fromisoformat(end_date) + timedelta(days=1)
+    ).isoformat()
     params = dict(base_params)
-    params["datetime"] = f"{start_date}/{end_date}"
+    params["datetime"] = f"{start_date}/{request_end}"
     return fetch_collection(collection_url, params, api_key)
 
 
@@ -137,10 +147,6 @@ def split_features_by_date(features: list[dict]) -> dict[str, list[dict]]:
             key=lambda feature: feature.get("properties", {}).get("time", "")
         )
     return grouped
-
-
-def _empty_collection() -> dict:
-    return {"type": "FeatureCollection", "features": [], "numberReturned": 0}
 
 
 @task(retries=3, retry_delay_seconds=30, log_prints=True)
@@ -183,13 +189,17 @@ def ingest_usgs_parameter(
     }
 
     written: list[str] = []
+    lookback = settings.lookback_days
     for run_start, run_end in contiguous_runs(missing):
         for chunk_start, chunk_end in year_chunks(run_start, run_end):
+            # Fetch a lookback lead-in so each day's window is complete even
+            # across year boundaries.
+            fetch_start = window_start(chunk_start, settings.start_date, lookback)
             payload = fetch_chunk(
                 collection_url,
                 base_params,
                 settings.usgs_api_key,
-                chunk_start,
+                fetch_start,
                 chunk_end,
             )
             grouped = split_features_by_date(payload.get("features", []))
@@ -198,7 +208,16 @@ def ingest_usgs_parameter(
                 if day not in missing_set:
                     continue
 
-                features = grouped.get(day, [])
+                first_day = window_start(day, settings.start_date, lookback)
+                features: list[dict] = []
+                for window_day in date_range(first_day, day):
+                    features.extend(grouped.get(window_day, []))
+                features.sort(
+                    key=lambda feature: feature.get("properties", {}).get(
+                        "time", ""
+                    )
+                )
+
                 if not features and day > grace_cutoff:
                     # Recent days may not be published yet; retry next run.
                     continue

@@ -6,10 +6,12 @@ renames, no metadata columns). Partitions use the bare-value hierarchy:
 * USGS: ``usgs/{daily|continuous}/parameter_code={code}/station_id={id}``
 * Open-Meteo: ``open-meteo/station_id={id}``
 
-Every calendar day is stored as its own ``ingest_date=YYYY-MM-DD`` partition
-containing a single ``part-000.json``. All dates are UTC. Writing a partition
-is idempotent: existing files are skipped so a backfill can be stopped and
-resumed later.
+Every calendar day is stored as its own ``ingest_date=YYYY-MM-DD`` partition.
+Each partition contains the raw payload for that day **plus the previous
+``LOOKBACK_DAYS`` days** (default 7), so a partition is an 8-day rolling window
+clipped at the dataset start. All dates are UTC. Writing a partition is
+idempotent: existing files are skipped so a backfill can be stopped and resumed
+later.
 
 When ``S3_ENDPOINT_URL`` is configured the partitions are uploaded to the
 S3-compatible object store (Garage); otherwise they fall back to a local
@@ -70,6 +72,19 @@ def year_chunks(start: str, end: str):
         chunk_end = min(date(cursor.year, 12, 31), stop)
         yield cursor.isoformat(), chunk_end.isoformat()
         cursor = chunk_end + timedelta(days=1)
+
+
+def window_start(day: str, start: str, lookback_days: int) -> str:
+    """Return the first date of the lookback window for ``day``.
+
+    The window is clipped at the dataset ``start`` so the earliest partitions
+    contain fewer than ``lookback_days + 1`` days.
+    """
+
+    candidate = (
+        date.fromisoformat(day) - timedelta(days=lookback_days)
+    ).isoformat()
+    return max(candidate, start)
 
 
 def usgs_prefix(station_site_no: str, data_type: str, parameter_code: str) -> str:
