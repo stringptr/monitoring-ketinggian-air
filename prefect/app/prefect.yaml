@@ -16,8 +16,6 @@ deployments:
       bucket for the three California monitoring stations, one partition per UTC
       day. Missing days are backfilled idempotently; existing days are skipped.
     entrypoint: flows/pipeline.py:bronze_pipeline
-    parameters:
-      start_date: "2023-01-01"
     concurrency_limit: 1
     work_pool:
       name: local-pool

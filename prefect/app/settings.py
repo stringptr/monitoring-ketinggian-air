@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-DEFAULT_START_DATE = "2023-01-01"
+DEFAULT_HISTORIC_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
 DEFAULT_EMPTY_GRACE_DAYS = 3
 DEFAULT_LOOKBACK_DAYS = 7
@@ -25,7 +25,8 @@ def _today_utc() -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    start_date: str
+    usgs_historic_start_date: str
+    open_meteo_historic_start_date: str
     end_date: str
     usgs_api_key: str | None
     s3_endpoint_url: str | None
@@ -43,7 +44,10 @@ def get_settings(
     overridden per flow run."""
 
     return Settings(
-        start_date=start_date or _env("HYDROLOGY_START_DATE", DEFAULT_START_DATE),
+        usgs_historic_start_date=start_date
+        or _env("USGS_HISTORIC_START_DATE", DEFAULT_HISTORIC_START_DATE),
+        open_meteo_historic_start_date=start_date
+        or _env("OPEN_METEO_HISTORIC_START_DATE", DEFAULT_HISTORIC_START_DATE),
         end_date=end_date or _env("HYDROLOGY_END_DATE") or _today_utc(),
         usgs_api_key=_env("USGS_API_KEY"),
         s3_endpoint_url=_env("S3_ENDPOINT_URL"),

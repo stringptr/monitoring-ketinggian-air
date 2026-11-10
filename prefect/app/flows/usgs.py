@@ -7,7 +7,7 @@ bronze bucket without any transformation:
 * ``00065`` (gage height) is ingested from the ``continuous`` collection.
 
 Data is partitioned by observation day (UTC): every date from
-``HYDROLOGY_START_DATE`` (default ``2023-01-01``) through today gets its own
+``USGS_HISTORIC_START_DATE`` (default ``2023-01-01``) through today gets its own
 ``ingest_date=YYYY-MM-DD/part-000.json``. Each file contains that day plus the
 previous ``LOOKBACK_DAYS`` days (default 7). Existing partitions are skipped,
 so a long backfill can be stopped and resumed without repeating completed days.
@@ -166,7 +166,9 @@ def ingest_usgs_parameter(
     existing = existing_dates(settings, prefix)
     missing = [
         day
-        for day in date_range(settings.start_date, settings.end_date)
+        for day in date_range(
+            settings.usgs_historic_start_date, settings.end_date
+        )
         if day not in existing
     ]
 
@@ -194,7 +196,9 @@ def ingest_usgs_parameter(
         for chunk_start, chunk_end in year_chunks(run_start, run_end):
             # Fetch a lookback lead-in so each day's window is complete even
             # across year boundaries.
-            fetch_start = window_start(chunk_start, settings.start_date, lookback)
+            fetch_start = window_start(
+                chunk_start, settings.usgs_historic_start_date, lookback
+            )
             payload = fetch_chunk(
                 collection_url,
                 base_params,
@@ -208,7 +212,9 @@ def ingest_usgs_parameter(
                 if day not in missing_set:
                     continue
 
-                first_day = window_start(day, settings.start_date, lookback)
+                first_day = window_start(
+                    day, settings.usgs_historic_start_date, lookback
+                )
                 features: list[dict] = []
                 for window_day in date_range(first_day, day):
                     features.extend(grouped.get(window_day, []))
@@ -249,7 +255,7 @@ def ingest_usgs(
     logger.info(
         "Ingesting USGS into bronze for %d station(s), %s..%s (UTC)",
         len(stations),
-        settings.start_date,
+        settings.usgs_historic_start_date,
         settings.end_date,
     )
 
