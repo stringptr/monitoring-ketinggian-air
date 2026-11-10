@@ -3,7 +3,7 @@
 Fetches the raw JSON archive response for each station and lands it in bronze
 verbatim (no column renames, no metadata columns). Data is partitioned by
 observation day (UTC): every date from ``OPEN_METEO_HISTORIC_START_DATE``
-(default ``2023-01-01``) through today gets its own ``ingest_date=YYYY-MM-DD``
+(default ``2023-01-01``) through yesterday gets its own ``ingest_date=YYYY-MM-DD``
 partition. Each file contains that day plus the previous ``LOOKBACK_DAYS``
 days (default 7). Existing partitions are skipped, so a long backfill can be
 stopped and resumed without repeating completed days.
@@ -181,13 +181,11 @@ def ingest_station_weather(station: Station, settings: Settings) -> list[str]:
 
 
 @flow(name="ingest-open-meteo", log_prints=True)
-def ingest_open_meteo(
-    start_date: str | None = None, end_date: str | None = None
-) -> list[str]:
+def ingest_open_meteo(start_date: str | None = None) -> list[str]:
     """Ingest raw Open-Meteo JSON for every active station."""
 
     logger = get_run_logger()
-    settings = get_settings(start_date, end_date)
+    settings = get_settings(start_date)
     stations = get_stations()
 
     logger.info(

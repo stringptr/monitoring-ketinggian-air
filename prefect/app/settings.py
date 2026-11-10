@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_HISTORIC_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
@@ -19,8 +19,8 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
-def _today_utc() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+def _yesterday_utc() -> str:
+    return (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 
 
 @dataclass(frozen=True)
@@ -37,18 +37,20 @@ class Settings:
     lookback_days: int
 
 
-def get_settings(
-    start_date: str | None = None, end_date: str | None = None
-) -> Settings:
-    """Build settings from the environment, allowing the date range to be
-    overridden per flow run."""
+def get_settings(start_date: str | None = None) -> Settings:
+    """Build settings from the environment, allowing the start date to be
+    overridden per flow run.
+
+    The end date is always yesterday (UTC) so the pipeline never ingests data
+    for the current day.
+    """
 
     return Settings(
         usgs_historic_start_date=start_date
         or _env("USGS_HISTORIC_START_DATE", DEFAULT_HISTORIC_START_DATE),
         open_meteo_historic_start_date=start_date
         or _env("OPEN_METEO_HISTORIC_START_DATE", DEFAULT_HISTORIC_START_DATE),
-        end_date=end_date or _env("HYDROLOGY_END_DATE") or _today_utc(),
+        end_date=_yesterday_utc(),
         usgs_api_key=_env("USGS_API_KEY"),
         s3_endpoint_url=_env("S3_ENDPOINT_URL"),
         s3_region=_env("S3_REGION", "garage"),

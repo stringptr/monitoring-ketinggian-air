@@ -7,8 +7,8 @@ bronze bucket without any transformation:
 * ``00065`` (gage height) is ingested from the ``continuous`` collection.
 
 Data is partitioned by observation day (UTC): every date from
-``USGS_HISTORIC_START_DATE`` (default ``2023-01-01``) through today gets its own
-``ingest_date=YYYY-MM-DD/part-000.json``. Each file contains that day plus the
+``USGS_HISTORIC_START_DATE`` (default ``2023-01-01``) through yesterday (UTC)
+gets its own ``ingest_date=YYYY-MM-DD/part-000.json``. Each file contains that day plus the
 previous ``LOOKBACK_DAYS`` days (default 7). Existing partitions are skipped,
 so a long backfill can be stopped and resumed without repeating completed days.
 
@@ -243,13 +243,11 @@ def ingest_usgs_parameter(
 
 
 @flow(name="ingest-usgs", log_prints=True)
-def ingest_usgs(
-    start_date: str | None = None, end_date: str | None = None
-) -> list[str]:
+def ingest_usgs(start_date: str | None = None) -> list[str]:
     """Ingest raw USGS hydrology JSON for every active station/parameter."""
 
     logger = get_run_logger()
-    settings = get_settings(start_date, end_date)
+    settings = get_settings(start_date)
     stations = get_stations()
 
     logger.info(
