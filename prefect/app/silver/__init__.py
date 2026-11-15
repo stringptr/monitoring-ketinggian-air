@@ -1,13 +1,14 @@
-"""Daily silver layer for the hydrology project.
+"""Native-resolution silver layer for the hydrology project.
 
 The package turns the raw bronze JSON written by the ingestion flows into
-tidy, typed daily tables, runs basic data-quality checks and records the
-results. Gold, modelling and dashboards are intentionally out of scope.
+cleaned, typed tables at the original observation resolution (15 minutes,
+hourly, and native daily). It only deduplicates, cleans, adds local-time
+columns, validates contracts and records data quality. Gold, modelling and
+dashboards are intentionally out of scope.
 
-Everything the layer produces is keyed by ``(station_id, date)`` where
-``date`` is the **local** calendar day of the station (America/Los_Angeles).
-The USGS daily values use that same water-day convention, so the whole
-silver layer stays aligned with the discharge series.
+Rows stay in the same ``ingest_date`` partition as bronze. ``time_utc`` is
+preserved and ``time_local`` / ``date_local`` are added for consumers that
+need the station's local calendar day.
 """
 
 from __future__ import annotations

@@ -40,12 +40,13 @@ def silver_pipeline(
     end_date: str | None = None,
     backfill: bool = False,
 ) -> dict:
-    """Build the daily silver tables.
+    """Build the native-resolution silver tables.
 
-    ``backfill=False`` processes the rolling window configured by
-    ``SILVER_LOOKBACK_DAYS`` (default 7 local days). ``backfill=True`` processes
+    ``backfill=False`` processes the rolling UTC ingest-date window configured
+    by ``SILVER_LOOKBACK_DAYS`` (default 7 days). ``backfill=True`` processes
     ``start_date`` (default: the historic start date) through ``end_date``
-    (default: yesterday local time) in a single Spark job.
+    (default: yesterday UTC); the range is split into calendar-year chunks
+    internally so a long backfill stays bounded.
     """
 
     logger = get_run_logger()
@@ -61,7 +62,8 @@ def silver_pipeline(
         raise ValueError(f"start_date {window_start} is after end_date {window_end}")
 
     logger.info(
-        "Silver transform %s..%s (backfill=%s, lookback=%d days)",
+        "Silver transform (native resolution) %s..%s UTC ingest dates "
+        "(backfill=%s, lookback=%d days)",
         window_start,
         window_end,
         backfill,

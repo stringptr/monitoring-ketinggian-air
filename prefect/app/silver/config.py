@@ -1,47 +1,48 @@
-"""Configuration and small date helpers for the daily silver layer.
+"""Configuration and date helpers for the native-resolution silver layer.
 
-Values come from the same environment variables the bronze flows already use,
-so no existing configuration file has to be rewritten. Anything the silver
-layer adds has a sensible default and can be overridden with the ``SILVER_*``
-variables documented in ``SILVER.md``.
+Silver keeps the original observation resolution: USGS 15-minute gage height,
+USGS daily discharge and Open-Meteo hourly weather. It only deduplicates,
+cleans, adds local-time columns, validates the contract and reports data
+quality. No aggregation, resampling, imputation or cross-source join happens
+here; those belong to gold/modelling.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-#: The USGS daily values are reported for the local water day of the station.
+#: The local day used for the extra ``time_local`` / ``date_local`` columns.
 TIMEZONE_NAME = "America/Los_Angeles"
-TIMEZONE = ZoneInfo(TIMEZONE_NAME)
 
 DEFAULT_HISTORIC_START_DATE = "2015-10-01"
 DEFAULT_LOOKBACK_DAYS = 7
-DEFAULT_GAGE_COMPLETENESS_MIN = 0.90
+DEFAULT_USGS_COMPLETENESS_MIN = 0.90
 DEFAULT_METEO_COMPLETENESS_MIN = 0.95
 DEFAULT_MAX_GAP_HOURS = 3
 DEFAULT_FRESHNESS_DAYS = 2
 
 DEFAULT_LOCAL_DIR = "/prefect/data"
 
-#: USGS continuous data is published every 15 minutes.
-SAMPLES_PER_HOUR = 4
-SECONDS_PER_SAMPLE = 3600 // SAMPLES_PER_HOUR
+#: Expected native observations per UTC ingest day.
+EXPECTED_USGS_SAMPLES_PER_DAY = 96  # 15-minute feed
+EXPECTED_METEO_HOURS_PER_DAY = 24
+EXPECTED_USGS_DAILY_VALUES = 1
 
-TABLE_USGS_DAILY = "usgs_daily"
-TABLE_GAGE_DAILY = "usgs_gage_height_daily"
-TABLE_METEO_DAILY = "meteo_daily"
-TABLE_STATION_DAILY = "station_daily"
+#: Labels used in DQ and quarantine paths.
+TABLE_USGS_CONTINUOUS = "usgs_continuous_00065"
+TABLE_USGS_DAILY = "usgs_daily_00060"
+TABLE_METEO_HOURLY = "open_meteo_hourly"
+
+#: Relative paths under the silver bucket. They mirror the bronze hierarchy.
+PATH_USGS_CONTINUOUS = "usgs/continuous/parameter_code=00065"
+PATH_USGS_DAILY = "usgs/daily/parameter_code=00060"
+PATH_METEO_HOURLY = "open-meteo"
 
 TABLE_DQ = "_dq"
 TABLE_QUARANTINE = "_quarantine"
-
-QUARANTINE_GAGE = "usgs_continuous_00065"
-QUARANTINE_USGS_DAILY = "usgs_daily_00060"
-QUARANTINE_METEO = "meteo_hourly"
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -72,7 +73,7 @@ class SilverSettings:
     s3_bucket_bronze: str
     s3_bucket_silver: str
     local_output_dir: str
-    gage_completeness_min: float
+    usgs_completeness_min: float
     meteo_completeness_min: float
     max_gap_hours: int
     freshness_days: int
@@ -97,9 +98,12 @@ class SilverSettings:
             s3_bucket_silver=_env("S3_BUCKET_SILVER", "silver") or "silver",
             local_output_dir=_env("BRONZE_LOCAL_DIR", DEFAULT_LOCAL_DIR)
             or DEFAULT_LOCAL_DIR,
-            gage_completeness_min=_env_float(
-                "SILVER_GAGE_COMPLETENESS_MIN",
-                DEFAULT_GAGE_COMPLETENESS_MIN,
+            usgs_completeness_min=_env_float(
+                "SILVER_USGS_COMPLETENESS_MIN",
+                _env_float(
+                    "SILVER_GAGE_COMPLETENESS_MIN",
+                    DEFAULT_USGS_COMPLETENESS_MIN,
+                ),
             ),
             meteo_completeness_min=_env_float(
                 "SILVER_METEO_COMPLETENESS_MIN",
@@ -115,46 +119,23 @@ class SilverSettings:
         )
 
 
-def expected_counts(day: str) -> tuple[int, int]:
-    """Return ``(expected_samples, expected_hours)`` for a local day.
+def default_end_date(now: datetime | None = None) -> str:
+    """Return the last complete UTC ingest day (yesterday UTC).
 
-    Most days contain 96 quarter-hour samples and 24 hours. DST transition
-    days contain 92/23 or 100/25, which keeps the completeness checks honest.
+    Silver processes bronze partitions, which are keyed by UTC observation
+    day. The bronze run at 02:00 UTC has already completed yesterday UTC, so
+    yesterday is the natural end of the daily window.
     """
-
-    day_date = date.fromisoformat(day)
-    start = datetime.combine(day_date, time.min, tzinfo=TIMEZONE)
-    end = datetime.combine(day_date + timedelta(days=1), time.min, tzinfo=TIMEZONE)
-    seconds = int(
-        (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds()
-    )
-    return seconds // SECONDS_PER_SAMPLE, seconds // 3600
-
-
-def local_today(now: datetime | None = None) -> date:
-    """Return the current date in the station timezone."""
 
     moment = now or datetime.now(timezone.utc)
-    return moment.astimezone(TIMEZONE).date()
-
-
-def default_end_date(now: datetime | None = None) -> str:
-    """Return the last local day that is guaranteed to be complete.
-
-    A local day can only be aggregated once the following midnight in
-    ``America/Los_Angeles`` has passed, which is 07:00/08:00 UTC. Subtracting
-    one day from the local date keeps the calculation correct on both sides
-    of that boundary.
-    """
-
-    return (local_today(now) - timedelta(days=1)).isoformat()
+    return (moment.astimezone(timezone.utc).date() - timedelta(days=1)).isoformat()
 
 
 def rolling_window(
     settings: SilverSettings,
     end_date: str | None = None,
 ) -> tuple[str, str]:
-    """Return the inclusive local-date window processed by a daily run."""
+    """Return the inclusive UTC ingest-date window processed by a daily run."""
 
     end = end_date or default_end_date()
     start = (

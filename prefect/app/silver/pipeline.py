@@ -1,17 +1,9 @@
-"""Orchestration of the daily silver transformation.
+"""Orchestration of the native-resolution silver transformation.
 
-The flow layer stays thin; this module contains the work so a single Prefect
-task owns the Spark session. The output is four partitioned tables plus DQ and
-quarantine artefacts:
-
-``silver/usgs_daily``
-    Native USGS daily discharge (00060).
-``silver/usgs_gage_height_daily``
-    Gage height (00065) aggregated from the 15-minute continuous feed.
-``silver/meteo_daily``
-    Open-Meteo hourly data aggregated to the local day.
-``silver/station_daily``
-    The three sources joined on ``(station_id, date)``.
+Silver mirrors the bronze hierarchy and keeps the original observation
+resolution. Bronze partitions are deduplicated, cleaned, given local-time
+columns, validated and checked for quality. There is no aggregation, no
+resampling and no cross-source join.
 """
 
 from __future__ import annotations
@@ -20,51 +12,50 @@ import uuid
 from contextlib import suppress
 from functools import reduce
 
-from datalake import date_range
+from datalake import date_range, year_chunks
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 from stations import get_stations
 
 from silver import readers
 from silver.config import (
-    QUARANTINE_GAGE,
-    QUARANTINE_METEO,
-    QUARANTINE_USGS_DAILY,
-    TABLE_GAGE_DAILY,
-    TABLE_METEO_DAILY,
-    TABLE_STATION_DAILY,
+    EXPECTED_METEO_HOURS_PER_DAY,
+    EXPECTED_USGS_DAILY_VALUES,
+    EXPECTED_USGS_SAMPLES_PER_DAY,
+    PATH_METEO_HOURLY,
+    PATH_USGS_CONTINUOUS,
+    PATH_USGS_DAILY,
+    TABLE_METEO_HOURLY,
+    TABLE_USGS_CONTINUOUS,
     TABLE_USGS_DAILY,
     SilverSettings,
-    next_day,
 )
 from silver.quality import (
     assert_no_duplicates,
     build_report,
-    run_gage_checks,
+    run_continuous_checks,
     run_meteo_checks,
-    run_station_checks,
+    run_quarantine_check,
     run_usgs_daily_checks,
     validate_contract,
 )
 from silver.schemas import (
-    GAGE_DAILY_CONTRACT,
-    GAGE_DAILY_SCHEMA,
-    METEO_DAILY_CONTRACT,
-    METEO_DAILY_SCHEMA,
-    STATION_DAILY_CONTRACT,
+    METEO_HOURLY_CONTRACT,
+    METEO_HOURLY_SCHEMA,
+    QUARANTINE_CONTINUOUS_SCHEMA,
+    QUARANTINE_METEO_SCHEMA,
+    QUARANTINE_USGS_DAILY_SCHEMA,
+    USGS_CONTINUOUS_CONTRACT,
+    USGS_CONTINUOUS_SCHEMA,
     USGS_DAILY_CONTRACT,
     USGS_DAILY_SCHEMA,
 )
 from silver.spark import build_spark_session
 from silver.transform import (
-    aggregate_gage,
-    aggregate_meteo,
-    build_station_daily,
     clean_continuous,
     clean_meteo,
     clean_usgs_daily,
-    day_dimension,
-    with_local_date,
 )
 from silver.writer import write_dq_report, write_quarantine, write_table
 
@@ -91,38 +82,80 @@ def _union(frames: list[DataFrame], schema, spark: SparkSession) -> DataFrame:
     return reduce(DataFrame.unionByName, usable)
 
 
-def _restrict(df: DataFrame, start: str, end: str) -> DataFrame:
-    return df.filter(F.col("date").between(start, end))
+def _skeleton(
+    spark: SparkSession,
+    stations,
+    dates: list[str],
+) -> DataFrame:
+    rows = [(station.site_no, day) for station in stations for day in dates]
+    schema = StructType(
+        [
+            StructField("station_id", StringType()),
+            StructField("ingest_date", StringType()),
+            StructField("expected_samples", IntegerType()),
+            StructField("expected_hours", IntegerType()),
+            StructField("expected_daily", IntegerType()),
+        ]
+    )
+    return spark.createDataFrame(
+        [
+            (
+                station_id,
+                day,
+                EXPECTED_USGS_SAMPLES_PER_DAY,
+                EXPECTED_METEO_HOURS_PER_DAY,
+                EXPECTED_USGS_DAILY_VALUES,
+            )
+            for station_id, day in rows
+        ],
+        schema,
+    )
 
 
-def _restrict_quarantine(df: DataFrame, start: str, end: str) -> DataFrame:
-    return df.filter(F.col("date").isNull() | F.col("date").between(start, end))
+def _max_ingest_date(skeleton: DataFrame) -> str:
+    value = skeleton.agg(F.max("ingest_date")).collect()[0][0]
+    return value or ""
 
 
-def _validate_and_write(
+def _process_table(
     spark: SparkSession,
     df: DataFrame,
+    quarantine: DataFrame,
     settings: SilverSettings,
     table: str,
+    path: str,
     contract,
     keys: list[str],
-    results: list[dict],
-) -> tuple[int, int]:
+    check_fn,
+    skeleton: DataFrame,
+    identifier: str,
+    check_freshness: bool,
+) -> tuple[int, int, int, int]:
     empty = _is_empty(df)
     if not empty:
         pdf = df.toPandas()
         if not pdf.empty:
             validate_contract(pdf, contract, table)
         assert_no_duplicates(df, keys, table)
-        write_table(spark, df, settings, table)
+        write_table(spark, df, settings, path)
+
+    results = check_fn(df, skeleton, settings, identifier, check_freshness)
+    quarantine_result = run_quarantine_check(
+        df,
+        quarantine,
+        table,
+        identifier,
+        _max_ingest_date(skeleton),
+    )
+    results.append(quarantine_result)
 
     report = build_report(spark, results)
-    identifier = results[0]["run_id"] if results else run_id()
-    write_dq_report(spark, report, settings, table, identifier)
+    write_dq_report(spark, report, settings, table)
+    write_quarantine(spark, quarantine, settings, table)
 
     rows = 0 if empty else df.count()
     failed = sum(1 for result in results if not result["passed"])
-    return rows, failed
+    return rows, len(results), failed, int(quarantine_result["failed_count"])
 
 
 def run_silver(
@@ -131,173 +164,155 @@ def run_silver(
     settings: SilverSettings,
     check_freshness: bool = True,
 ) -> dict:
-    """Transform every bronze partition in ``start_date..end_date``."""
+    """Clean every bronze partition in ``start_date..end_date``.
+
+    ``start_date`` and ``end_date`` are UTC ``ingest_date`` values. The range
+    is processed in calendar-year chunks so a full backfill validates and
+    writes a bounded amount of data at a time.
+    """
 
     spark = build_spark_session(settings)
     try:
         identifier = run_id()
         stations = get_stations()
-        local_days = list(date_range(start_date, end_date))
-        utc_days = list(date_range(start_date, next_day(end_date)))
-        dimension = day_dimension(spark, local_days)
 
-        gage_frames: list[DataFrame] = []
-        meteo_frames: list[DataFrame] = []
-        usgs_daily_frames: list[DataFrame] = []
-        quarantine_gage: list[DataFrame] = []
-        quarantine_meteo: list[DataFrame] = []
-        quarantine_usgs_daily: list[DataFrame] = []
-
+        availability: dict[tuple[str, str], set[str]] = {}
         for station in stations:
-            gage_available = readers.available_dates(
+            availability[(station.site_no, "continuous")] = readers.available_dates(
                 settings, readers.continuous_prefix(station)
             )
-            meteo_available = readers.available_dates(
-                settings, readers.meteo_prefix(station)
-            )
-            daily_available = readers.available_dates(
+            availability[(station.site_no, "daily")] = readers.available_dates(
                 settings, readers.daily_prefix(station)
             )
-
-            gage_days = sorted(set(utc_days) & gage_available)
-            meteo_days = sorted(set(utc_days) & meteo_available)
-            daily_days = sorted(set(local_days) & daily_available)
-
-            print(
-                f"silver {station.site_no}: gage partitions={len(gage_days)} "
-                f"meteo partitions={len(meteo_days)} "
-                f"daily partitions={len(daily_days)}"
+            availability[(station.site_no, "meteo")] = readers.available_dates(
+                settings, readers.meteo_prefix(station)
             )
 
-            gage_raw = readers.read_usgs_continuous(spark, settings, station, gage_days)
-            gage_valid, gage_quarantine = clean_continuous(spark, gage_raw)
-            gage_agg = _restrict(
-                aggregate_gage(gage_valid, dimension), start_date, end_date
-            )
-            if not _is_empty(gage_agg):
-                gage_frames.append(gage_agg)
-            quarantine_gage.append(
-                _restrict_quarantine(gage_quarantine, start_date, end_date)
-            )
-
-            meteo_raw = readers.read_meteo(spark, settings, station, meteo_days)
-            meteo_clean, meteo_quarantine = clean_meteo(spark, meteo_raw)
-            meteo_agg = _restrict(
-                aggregate_meteo(with_local_date(meteo_clean), dimension),
-                start_date,
-                end_date,
-            )
-            if not _is_empty(meteo_agg):
-                meteo_frames.append(meteo_agg)
-            quarantine_meteo.append(
-                _restrict_quarantine(meteo_quarantine, start_date, end_date)
-            )
-
-            daily_raw = readers.read_usgs_daily(spark, settings, station, daily_days)
-            daily_valid, daily_quarantine = clean_usgs_daily(spark, daily_raw)
-            daily_valid = _restrict(daily_valid, start_date, end_date)
-            if not _is_empty(daily_valid):
-                usgs_daily_frames.append(daily_valid)
-            quarantine_usgs_daily.append(
-                _restrict_quarantine(daily_quarantine, start_date, end_date)
-            )
-
-        gage = _union(gage_frames, GAGE_DAILY_SCHEMA, spark)
-        meteo = _union(meteo_frames, METEO_DAILY_SCHEMA, spark)
-        usgs_daily = _union(usgs_daily_frames, USGS_DAILY_SCHEMA, spark)
-        station_daily = build_station_daily(meteo, usgs_daily, gage)
-
-        tables: dict[str, int] = {}
-        dq: dict[str, dict[str, int]] = {}
-
-        usgs_results = run_usgs_daily_checks(usgs_daily, settings, identifier)
-        rows, failed = _validate_and_write(
-            spark,
-            usgs_daily,
-            settings,
-            TABLE_USGS_DAILY,
-            USGS_DAILY_CONTRACT,
-            ["station_id", "date", "parameter_code"],
-            usgs_results,
-        )
-        tables[TABLE_USGS_DAILY] = rows
-        dq[TABLE_USGS_DAILY] = {
-            "checks": len(usgs_results),
-            "failed": failed,
+        totals = {
+            TABLE_USGS_CONTINUOUS: 0,
+            TABLE_USGS_DAILY: 0,
+            TABLE_METEO_HOURLY: 0,
         }
+        dq = {table: {"checks": 0, "failed": 0} for table in totals}
+        quarantine_totals = {table: 0 for table in totals}
 
-        gage_results = run_gage_checks(gage, settings, identifier)
-        rows, failed = _validate_and_write(
-            spark,
-            gage,
-            settings,
-            TABLE_GAGE_DAILY,
-            GAGE_DAILY_CONTRACT,
-            ["station_id", "date"],
-            gage_results,
-        )
-        tables[TABLE_GAGE_DAILY] = rows
-        dq[TABLE_GAGE_DAILY] = {
-            "checks": len(gage_results),
-            "failed": failed,
-        }
+        for chunk_start, chunk_end in year_chunks(start_date, end_date):
+            chunk_dates = list(date_range(chunk_start, chunk_end))
+            skeleton = _skeleton(spark, stations, chunk_dates)
 
-        meteo_results = run_meteo_checks(meteo, settings, identifier)
-        rows, failed = _validate_and_write(
-            spark,
-            meteo,
-            settings,
-            TABLE_METEO_DAILY,
-            METEO_DAILY_CONTRACT,
-            ["station_id", "date"],
-            meteo_results,
-        )
-        tables[TABLE_METEO_DAILY] = rows
-        dq[TABLE_METEO_DAILY] = {
-            "checks": len(meteo_results),
-            "failed": failed,
-        }
+            continuous_frames: list[DataFrame] = []
+            daily_frames: list[DataFrame] = []
+            meteo_frames: list[DataFrame] = []
+            continuous_quarantine: list[DataFrame] = []
+            daily_quarantine: list[DataFrame] = []
+            meteo_quarantine: list[DataFrame] = []
 
-        station_results = run_station_checks(
-            station_daily, settings, identifier, check_freshness
-        )
-        rows, failed = _validate_and_write(
-            spark,
-            station_daily,
-            settings,
-            TABLE_STATION_DAILY,
-            STATION_DAILY_CONTRACT,
-            ["station_id", "date"],
-            station_results,
-        )
-        tables[TABLE_STATION_DAILY] = rows
-        dq[TABLE_STATION_DAILY] = {
-            "checks": len(station_results),
-            "failed": failed,
-        }
+            for station in stations:
+                site_no = station.site_no
 
-        quarantine = {}
-        for name, frames in (
-            (QUARANTINE_GAGE, quarantine_gage),
-            (QUARANTINE_METEO, quarantine_meteo),
-            (QUARANTINE_USGS_DAILY, quarantine_usgs_daily),
-        ):
-            if not frames:
-                continue
-            merged = reduce(DataFrame.unionByName, frames)
-            count = 0 if _is_empty(merged) else merged.count()
-            quarantine[name] = count
-            write_quarantine(spark, merged, settings, name)
+                continuous_days = sorted(
+                    set(chunk_dates) & availability[(site_no, "continuous")]
+                )
+                raw = readers.read_usgs_continuous(
+                    spark, settings, station, continuous_days
+                )
+                valid, quarantined = clean_continuous(spark, raw)
+                continuous_frames.append(valid)
+                continuous_quarantine.append(quarantined)
 
-        print(f"silver complete {start_date}..{end_date}: {tables}")
+                daily_days = sorted(set(chunk_dates) & availability[(site_no, "daily")])
+                raw = readers.read_usgs_daily(spark, settings, station, daily_days)
+                valid, quarantined = clean_usgs_daily(spark, raw)
+                daily_frames.append(valid)
+                daily_quarantine.append(quarantined)
+
+                meteo_days = sorted(set(chunk_dates) & availability[(site_no, "meteo")])
+                raw = readers.read_meteo(spark, settings, station, meteo_days)
+                valid, quarantined = clean_meteo(spark, raw)
+                meteo_frames.append(valid)
+                meteo_quarantine.append(quarantined)
+
+                print(
+                    f"silver {site_no}: continuous={len(continuous_days)} "
+                    f"daily={len(daily_days)} meteo={len(meteo_days)} "
+                    f"({chunk_start}..{chunk_end})"
+                )
+
+            continuous = _union(continuous_frames, USGS_CONTINUOUS_SCHEMA, spark)
+            daily = _union(daily_frames, USGS_DAILY_SCHEMA, spark)
+            meteo = _union(meteo_frames, METEO_HOURLY_SCHEMA, spark)
+            continuous_q = _union(
+                continuous_quarantine, QUARANTINE_CONTINUOUS_SCHEMA, spark
+            )
+            daily_q = _union(daily_quarantine, QUARANTINE_USGS_DAILY_SCHEMA, spark)
+            meteo_q = _union(meteo_quarantine, QUARANTINE_METEO_SCHEMA, spark)
+
+            rows, checks, failed, quarantined = _process_table(
+                spark,
+                continuous,
+                continuous_q,
+                settings,
+                TABLE_USGS_CONTINUOUS,
+                PATH_USGS_CONTINUOUS,
+                USGS_CONTINUOUS_CONTRACT,
+                ["station_id", "parameter_code", "time_utc"],
+                run_continuous_checks,
+                skeleton,
+                identifier,
+                check_freshness,
+            )
+            totals[TABLE_USGS_CONTINUOUS] += rows
+            dq[TABLE_USGS_CONTINUOUS]["checks"] += checks
+            dq[TABLE_USGS_CONTINUOUS]["failed"] += failed
+            quarantine_totals[TABLE_USGS_CONTINUOUS] += quarantined
+
+            rows, checks, failed, quarantined = _process_table(
+                spark,
+                daily,
+                daily_q,
+                settings,
+                TABLE_USGS_DAILY,
+                PATH_USGS_DAILY,
+                USGS_DAILY_CONTRACT,
+                ["station_id", "parameter_code", "date_local"],
+                run_usgs_daily_checks,
+                skeleton,
+                identifier,
+                check_freshness,
+            )
+            totals[TABLE_USGS_DAILY] += rows
+            dq[TABLE_USGS_DAILY]["checks"] += checks
+            dq[TABLE_USGS_DAILY]["failed"] += failed
+            quarantine_totals[TABLE_USGS_DAILY] += quarantined
+
+            rows, checks, failed, quarantined = _process_table(
+                spark,
+                meteo,
+                meteo_q,
+                settings,
+                TABLE_METEO_HOURLY,
+                PATH_METEO_HOURLY,
+                METEO_HOURLY_CONTRACT,
+                ["station_id", "time_utc"],
+                run_meteo_checks,
+                skeleton,
+                identifier,
+                check_freshness,
+            )
+            totals[TABLE_METEO_HOURLY] += rows
+            dq[TABLE_METEO_HOURLY]["checks"] += checks
+            dq[TABLE_METEO_HOURLY]["failed"] += failed
+            quarantine_totals[TABLE_METEO_HOURLY] += quarantined
+
+        print(f"silver complete {start_date}..{end_date}: {totals}")
 
         return {
             "run_id": identifier,
             "start_date": start_date,
             "end_date": end_date,
-            "tables": tables,
+            "tables": totals,
             "dq": dq,
-            "quarantine": quarantine,
+            "quarantine": quarantine_totals,
         }
     finally:
         spark.stop()

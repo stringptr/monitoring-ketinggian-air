@@ -1,4 +1,4 @@
-"""Idempotent writers for the silver tables, DQ reports and quarantine."""
+"""Idempotent writers for the native-resolution silver tables, DQ and quarantine."""
 
 from __future__ import annotations
 
@@ -28,20 +28,15 @@ def write_table(
     spark: SparkSession,
     df: DataFrame,
     settings: SilverSettings,
-    table: str,
-    partition_cols: tuple[str, ...] = ("station_id", "date"),
+    table_path_name: str,
+    partition_cols: tuple[str, ...] = ("station_id", "ingest_date"),
 ) -> str | None:
-    """Overwrite the partitions present in ``df`` and leave the rest intact.
-
-    ``spark.sql.sources.partitionOverwriteMode`` is set to ``dynamic`` in the
-    session factory, so a daily run only rewrites the stations/dates it
-    actually processed.
-    """
+    """Overwrite only the station/ingest_date partitions present in ``df``."""
 
     if _is_empty(df):
         return None
 
-    path = table_path(settings, table)
+    path = table_path(settings, table_path_name)
     (
         df.repartition(*partition_cols)
         .write.mode("overwrite")
@@ -49,6 +44,13 @@ def write_table(
         .parquet(path)
     )
     return path
+
+
+def _valid_ingest_date(column: str = "ingest_date") -> F.Column:
+    return F.when(
+        F.col(column).isNull() | (F.col(column) == ""),
+        F.lit("unknown"),
+    ).otherwise(F.col(column))
 
 
 def write_quarantine(
@@ -60,12 +62,12 @@ def write_quarantine(
     if _is_empty(df):
         return None
 
-    prepared = df.withColumn("date", F.coalesce(F.col("date"), F.lit("unknown")))
+    prepared = df.withColumn("ingest_date", _valid_ingest_date("ingest_date"))
     path = table_path(settings, f"{TABLE_QUARANTINE}/table={table}")
     (
-        prepared.repartition("station_id", "date")
+        prepared.repartition("station_id", "ingest_date")
         .write.mode("overwrite")
-        .partitionBy("station_id", "date")
+        .partitionBy("station_id", "ingest_date")
         .parquet(path)
     )
     return path
@@ -76,14 +78,16 @@ def write_dq_report(
     df: DataFrame,
     settings: SilverSettings,
     table: str,
-    run_id: str,
 ) -> str | None:
     if _is_empty(df):
         return None
 
-    path = table_path(
-        settings,
-        f"{TABLE_DQ}/table={table}/run_id={run_id}",
+    prepared = df.withColumn("ingest_date", _valid_ingest_date("ingest_date"))
+    path = table_path(settings, f"{TABLE_DQ}/table={table}")
+    (
+        prepared.repartition("ingest_date")
+        .write.mode("overwrite")
+        .partitionBy("ingest_date")
+        .parquet(path)
     )
-    df.write.mode("overwrite").parquet(path)
     return path

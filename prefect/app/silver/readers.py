@@ -1,11 +1,17 @@
-"""Readers that turn bronze JSON partitions into typed Spark DataFrames."""
+"""Readers that turn bronze JSON partitions into typed Spark DataFrames.
+
+The readers keep the original observation granularity. They only flatten the
+upstream JSON payload and attach the bronze ``ingest_date`` (read from the
+partition path) so downstream cleaning can deduplicate and report DQ per
+partition.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from datalake import existing_dates, open_meteo_prefix, usgs_prefix
-from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from stations import Station
 
@@ -19,13 +25,11 @@ from silver.schemas import (
     USGS_DAILY_SOURCE_SCHEMA,
 )
 
+_INGEST_DATE_PATTERN = r"ingest_date=([0-9-]+)"
+
 
 def available_dates(settings: SilverSettings, prefix: str) -> set[str]:
-    """Return the ``ingest_date`` values that already have a bronze part file.
-
-    ``datalake.existing_dates`` only relies on the storage attributes shared by
-    both settings objects, so it can be reused without touching bronze code.
-    """
+    """Return the ``ingest_date`` values that already have a bronze part file."""
 
     return existing_dates(settings, prefix)  # type: ignore[arg-type]
 
@@ -54,22 +58,13 @@ def meteo_prefix(station: Station) -> str:
     return open_meteo_prefix(station.site_no)
 
 
-def _dedupe_latest(df: DataFrame, keys: list[str]) -> DataFrame:
-    window = Window.partitionBy(*keys).orderBy(F.col("last_modified").desc_nulls_last())
-    return (
-        df.withColumn("_row_number", F.row_number().over(window))
-        .filter(F.col("_row_number") == 1)
-        .drop("_row_number")
-    )
-
-
 def read_usgs_continuous(
     spark: SparkSession,
     settings: SilverSettings,
     station: Station,
     days: list[str],
 ) -> DataFrame:
-    """Read USGS gage-height (00065) continuous partitions for a station."""
+    """Read raw USGS gage-height (00065) continuous features."""
 
     if not days:
         return spark.createDataFrame([], CONTINUOUS_SOURCE_SCHEMA)
@@ -77,13 +72,17 @@ def read_usgs_continuous(
     raw = spark.read.schema(USGS_COLLECTION_SCHEMA).json(
         _paths(settings, continuous_prefix(station), days)
     )
-    properties = raw.select(F.explode("features").alias("feature")).select(
-        "feature.properties.*"
+    properties = (
+        raw.withColumn("_file", F.input_file_name())
+        .select(F.explode("features").alias("feature"), "_file")
+        .select("feature.properties.*", "_file")
     )
 
-    df = properties.select(
+    return properties.select(
         F.lit(station.site_no).cast("string").alias("station_id"),
+        F.regexp_extract(F.col("_file"), _INGEST_DATE_PATTERN, 1).alias("ingest_date"),
         F.col("time_series_id").cast("string").alias("time_series_id"),
+        F.col("monitoring_location_id").cast("string").alias("monitoring_location_id"),
         F.col("parameter_code").cast("string").alias("parameter_code"),
         F.col("statistic_id").cast("string").alias("statistic_id"),
         F.col("time").cast("string").alias("time_raw"),
@@ -91,11 +90,10 @@ def read_usgs_continuous(
         F.col("unit_of_measure").cast("string").alias("unit"),
         F.col("approval_status").cast("string").alias("approval_status"),
         F.col("qualifier").cast("string").alias("qualifier"),
-        F.col("last_modified").cast("string").alias("last_modified"),
+        F.col("last_modified").cast("string").alias("last_modified_raw"),
+        F.col("method_category").cast("string").alias("method_category"),
         F.to_timestamp(F.col("time")).alias("ts_utc"),
     )
-
-    return _dedupe_latest(df, ["station_id", "parameter_code", "time_raw"])
 
 
 def read_usgs_daily(
@@ -104,7 +102,7 @@ def read_usgs_daily(
     station: Station,
     days: list[str],
 ) -> DataFrame:
-    """Read USGS daily discharge (00060) partitions for a station."""
+    """Read raw USGS daily discharge (00060) features."""
 
     if not days:
         return spark.createDataFrame([], USGS_DAILY_SOURCE_SCHEMA)
@@ -112,22 +110,26 @@ def read_usgs_daily(
     raw = spark.read.schema(USGS_COLLECTION_SCHEMA).json(
         _paths(settings, daily_prefix(station), days)
     )
-    properties = raw.select(F.explode("features").alias("feature")).select(
-        "feature.properties.*"
+    properties = (
+        raw.withColumn("_file", F.input_file_name())
+        .select(F.explode("features").alias("feature"), "_file")
+        .select("feature.properties.*", "_file")
     )
 
-    df = properties.select(
+    return properties.select(
         F.lit(station.site_no).cast("string").alias("station_id"),
-        F.date_format(F.to_date(F.col("time")), "yyyy-MM-dd").alias("date"),
+        F.regexp_extract(F.col("_file"), _INGEST_DATE_PATTERN, 1).alias("ingest_date"),
+        F.col("time_series_id").cast("string").alias("time_series_id"),
+        F.col("monitoring_location_id").cast("string").alias("monitoring_location_id"),
         F.col("parameter_code").cast("string").alias("parameter_code"),
+        F.col("statistic_id").cast("string").alias("statistic_id"),
+        F.col("time").cast("string").alias("date_raw"),
         F.col("value").cast("string").alias("value_raw"),
         F.col("unit_of_measure").cast("string").alias("unit"),
-        F.col("statistic_id").cast("string").alias("statistic_id"),
         F.col("approval_status").cast("string").alias("approval_status"),
-        F.col("last_modified").cast("string").alias("last_modified"),
+        F.col("qualifier").cast("string").alias("qualifier"),
+        F.col("last_modified").cast("string").alias("last_modified_raw"),
     )
-
-    return _dedupe_latest(df, ["station_id", "date", "parameter_code"])
 
 
 def read_meteo(
@@ -136,7 +138,7 @@ def read_meteo(
     station: Station,
     days: list[str],
 ) -> DataFrame:
-    """Read Open-Meteo hourly partitions and explode the hourly arrays."""
+    """Read raw Open-Meteo partitions and explode the hourly arrays."""
 
     if not days:
         return spark.createDataFrame([], METEO_SOURCE_SCHEMA)
@@ -150,12 +152,29 @@ def read_meteo(
     ]
     zipped = F.arrays_zip(*arrays)
 
-    return raw.select(F.explode(zipped).alias("z")).select(
+    exploded = raw.withColumn("_file", F.input_file_name()).select(
         F.lit(station.site_no).cast("string").alias("station_id"),
+        F.regexp_extract(F.col("_file"), _INGEST_DATE_PATTERN, 1).alias("ingest_date"),
+        F.col("latitude").cast("double").alias("latitude"),
+        F.col("longitude").cast("double").alias("longitude"),
+        F.col("elevation").cast("double").alias("elevation"),
+        F.col("timezone").cast("string").alias("timezone"),
+        F.to_json(F.col("hourly_units")).alias("units_json"),
+        F.explode(zipped).alias("z"),
+    )
+
+    return exploded.select(
+        "station_id",
+        "ingest_date",
         F.col("z.time").cast("string").alias("time_raw"),
         *[
             F.col(f"z.{variable}").cast("double").alias(variable)
             for variable in METEO_VARIABLES
         ],
         F.to_timestamp(F.col("z.time")).alias("ts_utc"),
+        "units_json",
+        "latitude",
+        "longitude",
+        "elevation",
+        "timezone",
     )

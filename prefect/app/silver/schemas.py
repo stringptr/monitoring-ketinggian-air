@@ -1,8 +1,9 @@
-"""Spark schemas and pandera contracts for the silver layer.
+"""Spark schemas and pandera contracts for the native-resolution silver layer.
 
 Bronze stores the upstream payload verbatim, so the reader schemas describe the
-raw USGS/Open-Meteo JSON exactly as published. The output schemas and the
-pandera contracts describe the tidy daily tables produced by the transforms.
+raw USGS/Open-Meteo JSON exactly as published. The output schemas and pandera
+contracts describe the cleaned tables, which keep the original observation
+resolution (15 minutes/hourly/daily).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pyspark.sql.types import (
     BooleanType,
     DoubleType,
     IntegerType,
+    MapType,
     StringType,
     StructField,
     StructType,
@@ -35,9 +37,7 @@ METEO_VARIABLES: tuple[str, ...] = (
     "cloud_cover",
 )
 
-#: Plausibility ranges used to quarantine hourly Open-Meteo values. The
-#: bounds are deliberately wide: this is a smoke detector, not a climate
-#: quality-control system.
+#: Plausibility ranges used to null/quarantine hourly Open-Meteo values.
 METEO_RANGES: dict[str, tuple[float, float]] = {
     "precipitation": (0.0, 1000.0),
     "rain": (0.0, 1000.0),
@@ -87,6 +87,11 @@ USGS_COLLECTION_SCHEMA = StructType(
 
 METEO_COLLECTION_SCHEMA = StructType(
     [
+        StructField("latitude", DoubleType()),
+        StructField("longitude", DoubleType()),
+        StructField("elevation", DoubleType()),
+        StructField("timezone", StringType()),
+        StructField("hourly_units", MapType(StringType(), StringType())),
         StructField(
             "hourly",
             StructType(
@@ -96,14 +101,16 @@ METEO_COLLECTION_SCHEMA = StructType(
                     for variable in METEO_VARIABLES
                 ]
             ),
-        )
+        ),
     ]
 )
 
 CONTINUOUS_SOURCE_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
+        StructField("ingest_date", StringType()),
         StructField("time_series_id", StringType()),
+        StructField("monitoring_location_id", StringType()),
         StructField("parameter_code", StringType()),
         StructField("statistic_id", StringType()),
         StructField("time_raw", StringType()),
@@ -111,7 +118,8 @@ CONTINUOUS_SOURCE_SCHEMA = StructType(
         StructField("unit", StringType()),
         StructField("approval_status", StringType()),
         StructField("qualifier", StringType()),
-        StructField("last_modified", StringType()),
+        StructField("last_modified_raw", StringType()),
+        StructField("method_category", StringType()),
         StructField("ts_utc", TimestampType()),
     ]
 )
@@ -119,123 +127,96 @@ CONTINUOUS_SOURCE_SCHEMA = StructType(
 USGS_DAILY_SOURCE_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
+        StructField("ingest_date", StringType()),
+        StructField("time_series_id", StringType()),
+        StructField("monitoring_location_id", StringType()),
         StructField("parameter_code", StringType()),
+        StructField("statistic_id", StringType()),
+        StructField("date_raw", StringType()),
         StructField("value_raw", StringType()),
         StructField("unit", StringType()),
-        StructField("statistic_id", StringType()),
         StructField("approval_status", StringType()),
-        StructField("last_modified", StringType()),
+        StructField("qualifier", StringType()),
+        StructField("last_modified_raw", StringType()),
     ]
 )
 
 METEO_SOURCE_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
+        StructField("ingest_date", StringType()),
         StructField("time_raw", StringType()),
         StructField("ts_utc", TimestampType()),
     ]
     + [StructField(variable, DoubleType()) for variable in METEO_VARIABLES]
+    + [
+        StructField("units_json", StringType()),
+        StructField("latitude", DoubleType()),
+        StructField("longitude", DoubleType()),
+        StructField("elevation", DoubleType()),
+        StructField("timezone", StringType()),
+    ]
 )
 
-GAGE_DAILY_SCHEMA = StructType(
+USGS_CONTINUOUS_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
-        StructField("gage_height_mean_ft", DoubleType()),
-        StructField("gage_height_min_ft", DoubleType()),
-        StructField("gage_height_max_ft", DoubleType()),
-        StructField("sample_count", IntegerType()),
-        StructField("expected_samples", IntegerType()),
-        StructField("approved_samples", IntegerType()),
-        StructField("provisional_samples", IntegerType()),
-        StructField("max_gap_seconds", IntegerType()),
+        StructField("ingest_date", StringType()),
+        StructField("time_utc", TimestampType()),
+        StructField("time_local", TimestampType()),
+        StructField("date_local", StringType()),
+        StructField("time_series_id", StringType()),
+        StructField("monitoring_location_id", StringType()),
+        StructField("parameter_code", StringType()),
+        StructField("statistic_id", StringType()),
+        StructField("value", DoubleType()),
+        StructField("unit", StringType()),
+        StructField("approval_status", StringType()),
+        StructField("qualifier", StringType()),
+        StructField("last_modified", TimestampType()),
+        StructField("method_category", StringType()),
     ]
 )
 
 USGS_DAILY_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
+        StructField("ingest_date", StringType()),
+        StructField("time_series_id", StringType()),
+        StructField("monitoring_location_id", StringType()),
         StructField("parameter_code", StringType()),
-        StructField("value_cfs", DoubleType()),
-        StructField("unit", StringType()),
         StructField("statistic_id", StringType()),
+        StructField("date_local", StringType()),
+        StructField("value", DoubleType()),
+        StructField("unit", StringType()),
         StructField("approval_status", StringType()),
-        StructField("last_modified", StringType()),
+        StructField("qualifier", StringType()),
+        StructField("last_modified", TimestampType()),
     ]
 )
 
-METEO_DAILY_SCHEMA = StructType(
+METEO_HOURLY_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
-        StructField("precipitation_mm", DoubleType()),
-        StructField("rain_mm", DoubleType()),
-        StructField("et0_mm", DoubleType()),
-        StructField("temperature_2m_mean_c", DoubleType()),
-        StructField("temperature_2m_min_c", DoubleType()),
-        StructField("temperature_2m_max_c", DoubleType()),
-        StructField("relative_humidity_2m_mean_pct", DoubleType()),
-        StructField("surface_pressure_mean_hpa", DoubleType()),
-        StructField("soil_moisture_0_7_mean", DoubleType()),
-        StructField("soil_moisture_7_28_mean", DoubleType()),
-        StructField("soil_moisture_28_100_mean", DoubleType()),
-        StructField("wind_speed_10m_mean_kmh", DoubleType()),
-        StructField("wind_speed_10m_max_kmh", DoubleType()),
-        StructField("shortwave_radiation_mean_wm2", DoubleType()),
-        StructField("shortwave_radiation_sum_whm2", DoubleType()),
-        StructField("cloud_cover_mean_pct", DoubleType()),
-        StructField("observed_hours", IntegerType()),
-        StructField("expected_hours", IntegerType()),
+        StructField("ingest_date", StringType()),
+        StructField("time_utc", TimestampType()),
+        StructField("time_local", TimestampType()),
+        StructField("date_local", StringType()),
     ]
-)
-
-STATION_DAILY_SCHEMA = StructType(
-    [
-        StructField("station_id", StringType()),
-        StructField("date", StringType()),
-        StructField("discharge_cfs", DoubleType()),
-        StructField("discharge_unit", StringType()),
-        StructField("discharge_statistic_id", StringType()),
-        StructField("discharge_approval_status", StringType()),
-        StructField("gage_height_mean_ft", DoubleType()),
-        StructField("gage_height_min_ft", DoubleType()),
-        StructField("gage_height_max_ft", DoubleType()),
-        StructField("gage_height_sample_count", IntegerType()),
-        StructField("gage_height_expected_samples", IntegerType()),
-        StructField("gage_height_provisional_samples", IntegerType()),
-        StructField("gage_height_completeness", DoubleType()),
-        StructField("gage_height_max_gap_seconds", IntegerType()),
-        StructField("precipitation_mm", DoubleType()),
-        StructField("rain_mm", DoubleType()),
-        StructField("et0_mm", DoubleType()),
-        StructField("temperature_2m_mean_c", DoubleType()),
-        StructField("temperature_2m_min_c", DoubleType()),
-        StructField("temperature_2m_max_c", DoubleType()),
-        StructField("relative_humidity_2m_mean_pct", DoubleType()),
-        StructField("surface_pressure_mean_hpa", DoubleType()),
-        StructField("soil_moisture_0_7_mean", DoubleType()),
-        StructField("soil_moisture_7_28_mean", DoubleType()),
-        StructField("soil_moisture_28_100_mean", DoubleType()),
-        StructField("wind_speed_10m_mean_kmh", DoubleType()),
-        StructField("wind_speed_10m_max_kmh", DoubleType()),
-        StructField("shortwave_radiation_mean_wm2", DoubleType()),
-        StructField("shortwave_radiation_sum_whm2", DoubleType()),
-        StructField("cloud_cover_mean_pct", DoubleType()),
-        StructField("meteo_observed_hours", IntegerType()),
-        StructField("meteo_expected_hours", IntegerType()),
-        StructField("meteo_completeness", DoubleType()),
-        StructField("has_discharge", BooleanType()),
-        StructField("has_gage_height", BooleanType()),
-        StructField("has_meteo", BooleanType()),
+    + [StructField(variable, DoubleType()) for variable in METEO_VARIABLES]
+    + [
+        StructField("units_json", StringType()),
+        StructField("latitude", DoubleType()),
+        StructField("longitude", DoubleType()),
+        StructField("elevation", DoubleType()),
+        StructField("timezone", StringType()),
     ]
 )
 
 QUARANTINE_CONTINUOUS_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
+        StructField("ingest_date", StringType()),
         StructField("time_raw", StringType()),
         StructField("parameter_code", StringType()),
         StructField("value_raw", StringType()),
@@ -247,7 +228,8 @@ QUARANTINE_CONTINUOUS_SCHEMA = StructType(
 QUARANTINE_USGS_DAILY_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
+        StructField("ingest_date", StringType()),
+        StructField("date_raw", StringType()),
         StructField("parameter_code", StringType()),
         StructField("value_raw", StringType()),
         StructField("reason", StringType()),
@@ -257,8 +239,9 @@ QUARANTINE_USGS_DAILY_SCHEMA = StructType(
 QUARANTINE_METEO_SCHEMA = StructType(
     [
         StructField("station_id", StringType()),
-        StructField("date", StringType()),
+        StructField("ingest_date", StringType()),
         StructField("time_raw", StringType()),
+        StructField("date_local", StringType()),
         StructField("variable", StringType()),
         StructField("value", DoubleType()),
         StructField("reason", StringType()),
@@ -269,6 +252,8 @@ DQ_REPORT_SCHEMA = StructType(
     [
         StructField("run_id", StringType()),
         StructField("table", StringType()),
+        StructField("ingest_date", StringType()),
+        StructField("station_id", StringType()),
         StructField("check_name", StringType()),
         StructField("severity", StringType()),
         StructField("passed", BooleanType()),
@@ -282,7 +267,7 @@ DQ_REPORT_SCHEMA = StructType(
 _DATE_CHECK = pa.Check.str_matches(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_COLUMN = pa.Column(str, _DATE_CHECK, nullable=False, coerce=True)
 _STATION_COLUMN = pa.Column(str, nullable=False, coerce=True)
-_RUN_ID_COLUMN = pa.Column(str, nullable=True, coerce=True)
+_INGEST_COLUMN = pa.Column(str, _DATE_CHECK, nullable=False, coerce=True)
 _STRING_COLUMN = pa.Column(str, nullable=True, coerce=True)
 
 
@@ -290,25 +275,27 @@ def _float(nullable: bool = True) -> pa.Column:
     return pa.Column(float, nullable=nullable, coerce=True)
 
 
-def _int(nullable: bool = False) -> pa.Column:
-    # ``Int64`` is the pandas nullable integer dtype. Spark emits int32/float64
-    # through Arrow when a column contains nulls, and ``coerce=True`` brings
-    # both shapes back to a single contract type.
-    return pa.Column("Int64", nullable=nullable, coerce=True)
+def _timestamp(nullable: bool = True) -> pa.Column:
+    return pa.Column(pa.DateTime, nullable=nullable, coerce=True)
 
 
-GAGE_DAILY_CONTRACT = pa.DataFrameSchema(
+USGS_CONTINUOUS_CONTRACT = pa.DataFrameSchema(
     {
         "station_id": _STATION_COLUMN,
-        "date": _DATE_COLUMN,
-        "gage_height_mean_ft": _float(),
-        "gage_height_min_ft": _float(),
-        "gage_height_max_ft": _float(),
-        "sample_count": _int(),
-        "expected_samples": _int(),
-        "approved_samples": _int(),
-        "provisional_samples": _int(),
-        "max_gap_seconds": _float(),
+        "ingest_date": _INGEST_COLUMN,
+        "time_utc": _timestamp(nullable=False),
+        "time_local": _timestamp(nullable=False),
+        "date_local": _DATE_COLUMN,
+        "time_series_id": _STRING_COLUMN,
+        "monitoring_location_id": _STRING_COLUMN,
+        "parameter_code": pa.Column(str, nullable=False, coerce=True),
+        "statistic_id": _STRING_COLUMN,
+        "value": _float(),
+        "unit": _STRING_COLUMN,
+        "approval_status": _STRING_COLUMN,
+        "qualifier": _STRING_COLUMN,
+        "last_modified": _timestamp(),
+        "method_category": _STRING_COLUMN,
     },
     strict=False,
     coerce=True,
@@ -317,83 +304,35 @@ GAGE_DAILY_CONTRACT = pa.DataFrameSchema(
 USGS_DAILY_CONTRACT = pa.DataFrameSchema(
     {
         "station_id": _STATION_COLUMN,
-        "date": _DATE_COLUMN,
+        "ingest_date": _INGEST_COLUMN,
+        "time_series_id": _STRING_COLUMN,
+        "monitoring_location_id": _STRING_COLUMN,
         "parameter_code": pa.Column(str, nullable=False, coerce=True),
-        "value_cfs": _float(),
-        "unit": _STRING_COLUMN,
         "statistic_id": _STRING_COLUMN,
+        "date_local": _DATE_COLUMN,
+        "value": _float(),
+        "unit": _STRING_COLUMN,
         "approval_status": _STRING_COLUMN,
-        "last_modified": _STRING_COLUMN,
+        "qualifier": _STRING_COLUMN,
+        "last_modified": _timestamp(),
     },
     strict=False,
     coerce=True,
 )
 
-METEO_DAILY_CONTRACT = pa.DataFrameSchema(
+METEO_HOURLY_CONTRACT = pa.DataFrameSchema(
     {
         "station_id": _STATION_COLUMN,
-        "date": _DATE_COLUMN,
-        "precipitation_mm": _float(),
-        "rain_mm": _float(),
-        "et0_mm": _float(),
-        "temperature_2m_mean_c": _float(),
-        "temperature_2m_min_c": _float(),
-        "temperature_2m_max_c": _float(),
-        "relative_humidity_2m_mean_pct": _float(),
-        "surface_pressure_mean_hpa": _float(),
-        "soil_moisture_0_7_mean": _float(),
-        "soil_moisture_7_28_mean": _float(),
-        "soil_moisture_28_100_mean": _float(),
-        "wind_speed_10m_mean_kmh": _float(),
-        "wind_speed_10m_max_kmh": _float(),
-        "shortwave_radiation_mean_wm2": _float(),
-        "shortwave_radiation_sum_whm2": _float(),
-        "cloud_cover_mean_pct": _float(),
-        "observed_hours": _int(),
-        "expected_hours": _int(),
-    },
-    strict=False,
-    coerce=True,
-)
-
-STATION_DAILY_CONTRACT = pa.DataFrameSchema(
-    {
-        "station_id": _STATION_COLUMN,
-        "date": _DATE_COLUMN,
-        "discharge_cfs": _float(),
-        "discharge_unit": _STRING_COLUMN,
-        "discharge_statistic_id": _STRING_COLUMN,
-        "discharge_approval_status": _STRING_COLUMN,
-        "gage_height_mean_ft": _float(),
-        "gage_height_min_ft": _float(),
-        "gage_height_max_ft": _float(),
-        "gage_height_sample_count": _int(nullable=True),
-        "gage_height_expected_samples": _int(nullable=True),
-        "gage_height_provisional_samples": _int(nullable=True),
-        "gage_height_completeness": _float(),
-        "gage_height_max_gap_seconds": _float(),
-        "precipitation_mm": _float(),
-        "rain_mm": _float(),
-        "et0_mm": _float(),
-        "temperature_2m_mean_c": _float(),
-        "temperature_2m_min_c": _float(),
-        "temperature_2m_max_c": _float(),
-        "relative_humidity_2m_mean_pct": _float(),
-        "surface_pressure_mean_hpa": _float(),
-        "soil_moisture_0_7_mean": _float(),
-        "soil_moisture_7_28_mean": _float(),
-        "soil_moisture_28_100_mean": _float(),
-        "wind_speed_10m_mean_kmh": _float(),
-        "wind_speed_10m_max_kmh": _float(),
-        "shortwave_radiation_mean_wm2": _float(),
-        "shortwave_radiation_sum_whm2": _float(),
-        "cloud_cover_mean_pct": _float(),
-        "meteo_observed_hours": _int(nullable=True),
-        "meteo_expected_hours": _int(nullable=True),
-        "meteo_completeness": _float(),
-        "has_discharge": pa.Column(bool, nullable=False, coerce=True),
-        "has_gage_height": pa.Column(bool, nullable=False, coerce=True),
-        "has_meteo": pa.Column(bool, nullable=False, coerce=True),
+        "ingest_date": _INGEST_COLUMN,
+        "time_utc": _timestamp(nullable=False),
+        "time_local": _timestamp(nullable=False),
+        "date_local": _DATE_COLUMN,
+        **{variable: _float() for variable in METEO_VARIABLES},
+        "units_json": _STRING_COLUMN,
+        "latitude": _float(),
+        "longitude": _float(),
+        "elevation": _float(),
+        "timezone": _STRING_COLUMN,
     },
     strict=False,
     coerce=True,
@@ -401,13 +340,15 @@ STATION_DAILY_CONTRACT = pa.DataFrameSchema(
 
 DQ_REPORT_CONTRACT = pa.DataFrameSchema(
     {
-        "run_id": _RUN_ID_COLUMN,
+        "run_id": _STRING_COLUMN,
         "table": pa.Column(str, nullable=False, coerce=True),
+        "ingest_date": _INGEST_COLUMN,
+        "station_id": _STATION_COLUMN,
         "check_name": pa.Column(str, nullable=False, coerce=True),
         "severity": pa.Column(str, nullable=False, coerce=True),
         "passed": pa.Column(bool, nullable=False, coerce=True),
-        "failed_count": _int(),
-        "total_count": _int(),
+        "failed_count": pa.Column(int, nullable=False, coerce=True),
+        "total_count": pa.Column(int, nullable=False, coerce=True),
         "details": _STRING_COLUMN,
         "generated_at": pa.Column(str, nullable=False, coerce=True),
     },
