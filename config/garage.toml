@@ -1,6 +1,6 @@
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"
-dfsknfjsddb_engine = "lmdb"
+db_engine = "lmdb"
 metadata_auto_snapshot_interval = "24h"
 
 replication_factor = 1
