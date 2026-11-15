@@ -63,8 +63,6 @@ from silver.writer import write_dq_report, write_quarantine, write_table
 def run_id() -> str:
     value = None
     with suppress(Exception):
-        # Prefect is only available inside a worker; standalone runs fall back
-        # to a random identifier.
         from prefect.runtime import flow_run
 
         value = flow_run.id

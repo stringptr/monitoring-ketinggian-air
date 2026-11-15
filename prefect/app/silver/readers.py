@@ -31,7 +31,7 @@ _INGEST_DATE_PATTERN = r"ingest_date=([0-9-]+)"
 def available_dates(settings: SilverSettings, prefix: str) -> set[str]:
     """Return the ``ingest_date`` values that already have a bronze part file."""
 
-    return existing_dates(settings, prefix)  # type: ignore[arg-type]
+    return existing_dates(settings, prefix)
 
 
 def _bronze_base(settings: SilverSettings, prefix: str) -> str:

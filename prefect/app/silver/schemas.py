@@ -21,7 +21,6 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-#: The twelve Open-Meteo variables requested by the bronze flow.
 METEO_VARIABLES: tuple[str, ...] = (
     "precipitation",
     "rain",
@@ -37,7 +36,6 @@ METEO_VARIABLES: tuple[str, ...] = (
     "cloud_cover",
 )
 
-#: Plausibility ranges used to null/quarantine hourly Open-Meteo values.
 METEO_RANGES: dict[str, tuple[float, float]] = {
     "precipitation": (0.0, 1000.0),
     "rain": (0.0, 1000.0),

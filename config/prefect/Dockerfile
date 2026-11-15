@@ -5,11 +5,6 @@ RUN uv pip install --no-cache \
     s3fs \
     boto3
 
-# ---------------------------------------------------------------------------
-# Silver layer: local PySpark, mirroring the Azure Synapse runtime used later.
-# The S3A connector jars are baked in so the worker never downloads Maven
-# artifacts while a flow is running.
-# ---------------------------------------------------------------------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         openjdk-21-jre-headless \

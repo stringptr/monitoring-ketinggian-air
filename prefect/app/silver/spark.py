@@ -50,9 +50,6 @@ def build_spark_session(settings: SilverSettings) -> SparkSession:
 
     local_ip = os.getenv("SPARK_LOCAL_IP")
     if local_ip:
-        # Local mode still starts Python workers that connect back to the
-        # driver. Pinning the driver host avoids containers/Windows resolving
-        # a hostname the worker cannot reach.
         builder = builder.config("spark.driver.host", local_ip)
 
     if settings.s3_endpoint_url:
@@ -81,9 +78,6 @@ def build_spark_session(settings: SilverSettings) -> SparkSession:
                 "spark.hadoop.fs.s3a.aws.credentials.provider",
                 "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
             )
-            # Garage is not AWS; disable S3 change detection and use the
-            # directory committer, which is the safest option for small
-            # partitioned writes on non-AWS object stores.
             .config("spark.hadoop.fs.s3a.change.detection.mode", "none")
             .config("spark.hadoop.fs.s3a.change.detection.source", "etag")
             .config("spark.hadoop.fs.s3a.committer.name", "directory")

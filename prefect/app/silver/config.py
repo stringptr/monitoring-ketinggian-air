@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-#: The local day used for the extra ``time_local`` / ``date_local`` columns.
 TIMEZONE_NAME = "America/Los_Angeles"
 
 DEFAULT_HISTORIC_START_DATE = "2015-10-01"
@@ -26,17 +25,14 @@ DEFAULT_FRESHNESS_DAYS = 2
 
 DEFAULT_LOCAL_DIR = "/prefect/data"
 
-#: Expected native observations per UTC ingest day.
-EXPECTED_USGS_SAMPLES_PER_DAY = 96  # 15-minute feed
+EXPECTED_USGS_SAMPLES_PER_DAY = 96
 EXPECTED_METEO_HOURS_PER_DAY = 24
 EXPECTED_USGS_DAILY_VALUES = 1
 
-#: Labels used in DQ and quarantine paths.
 TABLE_USGS_CONTINUOUS = "usgs_continuous_00065"
 TABLE_USGS_DAILY = "usgs_daily_00060"
 TABLE_METEO_HOURLY = "open_meteo_hourly"
 
-#: Relative paths under the silver bucket. They mirror the bronze hierarchy.
 PATH_USGS_CONTINUOUS = "usgs/continuous/parameter_code=00065"
 PATH_USGS_DAILY = "usgs/daily/parameter_code=00060"
 PATH_METEO_HOURLY = "open-meteo"
