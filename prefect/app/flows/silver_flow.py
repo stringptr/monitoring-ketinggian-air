@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import date
+from pathlib import Path
+
+# Prefect loads entrypoints as standalone scripts and may not inherit the
+# worker's PYTHONPATH. Put the app root (the parent of this ``flows`` package)
+# on sys.path so ``silver`` and ``flows`` remain importable.
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 
 from silver.config import SilverSettings, default_end_date, rolling_window
 from silver.pipeline import run_silver

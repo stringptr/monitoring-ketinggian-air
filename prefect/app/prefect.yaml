@@ -44,7 +44,7 @@ deployments:
     description: >-
       Manual one-off backfill of the silver tables from the historic start date
       through the last complete local day. Runs as a single Spark job.
-    entrypoint: flows/silver.py:silver_pipeline
+    entrypoint: flows/silver_flow.py:silver_pipeline
     parameters:
       backfill: true
     concurrency_limit: 1

@@ -12,7 +12,7 @@ RUN uv pip install --no-cache \
 # ---------------------------------------------------------------------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        openjdk-17-jre-headless \
+        openjdk-21-jre-headless \
         curl \
         ca-certificates \
         procps \

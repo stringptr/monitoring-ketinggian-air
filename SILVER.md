@@ -157,19 +157,22 @@ Silver membaca partisi UTC `D` dan `D+1` untuk membentuk hari lokal `D`.
 
 ### Build ulang image worker
 
-Image worker sekarang berisi Java 17, PySpark, pyarrow, pandera, dan jar S3A.
+Image worker sekarang berisi Java 21, PySpark, pyarrow, pandera, dan jar S3A.
 
 ```sh
 docker compose build prefect-server prefect-worker
 docker compose up -d
 ```
 
+Pada Windows, `config/garage-init/Dockerfile` juga menormalkan akhir baris
+`init.sh` (CRLF → LF) agar skrip bisa dijalankan di container Alpine.
+
 ### Backfill seluruh histori
 
 Sekali saja, sebagai satu job Spark:
 
 ```sh
-docker compose exec prefect-worker python -m flows.silver
+docker compose exec prefect-worker python -m flows.silver_flow
 ```
 
 atau lewat deployment manual:
@@ -208,16 +211,25 @@ Jika `S3_ENDPOINT_URL` dikosongkan, silver membaca dan menulis ke
   sudah diuji end-to-end dengan PySpark 4.0.2 + Java 21 pada data sintetis
   lokal (dua hari, termasuk nilai rusak). Partisi lama tetap utuh saat satu
   hari diproses ulang.
-- Pembacaan/penulisan ke Garage melalui S3A **belum** diuji karena Docker tidak
-  berjalan di mesin pengembangan. Setelah `docker compose up`, jalankan backfill
-  satu hari lebih dulu untuk memverifikasi koneksi S3A sebelum backfill penuh.
+- Sudah diuji di Docker Compose dengan Garage v2.5 melalui S3A:
+  - tulis/baca dataset kecil ke `s3a://silver`;
+  - ingest bronze nyata untuk 3 stasiun, 2024-01-01 s/d 2024-01-04;
+  - `silver-backfill` berjalan lewat worker Prefect dan selesai `Completed`
+    (12 baris `station_daily`, 3 stasiun × 4 hari);
+  - nilai discharge cocok dengan USGS (contoh `11525670` 2024-01-01 = 61.1 cfs);
+  - 14 check DQ lulus, tidak ada baris quarantine;
+  - memproses ulang tanggal yang sama tidak menggandakan baris (tetap 9 untuk
+    3 hari), dan memproses 2024-01-04 tidak menghapus partisi 2024-01-01..03.
+- Flow entrypoint sengaja dinamai `flows/silver_flow.py` (bukan `silver.py`)
+  karena Prefect memuat entrypoint sebagai modul dengan nama file; nama
+  `silver.py` akan menimpa paket `silver`.
 - Image worker bertambah sekitar 600 MB karena jar AWS SDK v2 bundle untuk S3A.
 
 ## Batasan yang diketahui
 
-1. **Ukuran tabel harian ≈ 12 ribu baris** (3 stasiun × ~4.000 hari), di bawah
-   syarat ≥100.000 records di `rencana.txt`. Tabel hourly bisa ditambahkan
-   nanti tanpa mengubah tabel harian.
+1. **Ukuran tabel harian ≈ 12 ribu baris** untuk seluruh histori (3 stasiun ×
+   ~4.000 hari). Syarat ≥100.000 records sudah tidak berlaku untuk proyek ini.
+   Tabel hourly bisa ditambahkan nanti tanpa mengubah tabel harian.
 2. **Bronze tidak me-refresh partisi lama.** Karena ingestion melewati partisi
    yang sudah ada, revisi USGS untuk tanggal lama tidak akan terlihat di
    silver. Silver hanya bisa mengolah ulang apa yang ada di bronze.
@@ -259,6 +271,6 @@ prefect/app/silver/
   writer.py       # overwrite partisi, DQ report, quarantine
   pipeline.py     # orkestrasi satu run Spark
 prefect/app/flows/
-  silver.py       # flow silver_pipeline
+  silver_flow.py  # flow silver_pipeline
   daily_pipeline.py # flow bronze -> silver
 ```

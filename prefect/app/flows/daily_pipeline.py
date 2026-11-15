@@ -8,8 +8,18 @@ once.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Prefect loads entrypoints as standalone scripts and may not inherit the
+# worker's PYTHONPATH. Put the app root (the parent of this ``flows`` package)
+# on sys.path so ``flows`` and ``silver`` remain importable.
+_APP_ROOT = Path(__file__).resolve().parents[1]
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
 from flows.pipeline import bronze_pipeline
-from flows.silver import silver_pipeline
+from flows.silver_flow import silver_pipeline
 from prefect import flow, get_run_logger
 
 
