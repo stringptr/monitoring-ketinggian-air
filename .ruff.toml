@@ -1,0 +1,7 @@
+# The silver code is written to stay runnable on Python 3.10, which is what
+# Azure Synapse Spark pools commonly provide. Keep timezone.utc instead of the
+# Python 3.11-only datetime.UTC alias.
+target-version = "py310"
+
+[lint]
+ignore = ["UP017"]

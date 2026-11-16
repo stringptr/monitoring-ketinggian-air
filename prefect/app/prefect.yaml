@@ -24,3 +24,30 @@ deployments:
         cron: "0 2 * * *"
         timezone: UTC
         active: true
+
+  - name: daily-bronze-silver
+    description: >-
+      Run the existing bronze ingestion and then the native-resolution silver
+      transform. Deactivate the bronze-ingest deployment above after enabling
+      this one so each day is only ingested once.
+    entrypoint: flows/daily_pipeline.py:daily_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0230-utc
+        cron: "30 2 * * *"
+        timezone: UTC
+        active: true
+
+  - name: silver-backfill
+    description: >-
+      Manual one-off backfill of the native-resolution silver tables from the
+      historic start date through the last complete UTC ingest day. The range
+      is processed in calendar-year chunks.
+    entrypoint: flows/silver_flow.py:silver_pipeline
+    parameters:
+      backfill: true
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
