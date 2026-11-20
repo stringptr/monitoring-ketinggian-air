@@ -51,3 +51,30 @@ deployments:
     concurrency_limit: 1
     work_pool:
       name: local-pool
+
+  - name: daily-gold
+    description: >-
+      Build the hourly gold dataset and the model features from silver, then
+      record the data-quality report and the dataset version. Runs after the
+      daily bronze and silver deployments because it only reads silver.
+    entrypoint: flows/gold_flow.py:gold_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0300-utc
+        cron: "0 3 * * *"
+        timezone: UTC
+        active: true
+
+  - name: gold-backfill
+    description: >-
+      Manual one-off rebuild of the gold tables from the historic start date
+      through the last complete UTC day. Gold is fully rebuildable from silver,
+      so this can be run whenever the feature definitions change.
+    entrypoint: flows/gold_flow.py:gold_pipeline
+    parameters:
+      backfill: true
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool

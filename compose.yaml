@@ -65,6 +65,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 60s
 
   prefect-server:
     build:
@@ -113,8 +114,28 @@ services:
     env_file: .env
     volumes:
       - ./prefect/app:/prefect:z
+      - ./scripts:/prefect/scripts:z
     command: >
       sh -c "prefect work-pool create local-pool --type process || true;
              prefect --no-prompt deploy --all &&
              exec prefect worker start --pool local-pool"
     restart: on-failure
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: config/dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      garage:
+        condition: service_healthy
+    ports:
+      - "${HOST_IP:-127.0.0.1}:${DASHBOARD_HOST_PORT:-8501}:8501"
+    environment:
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://garage:3900}
+      S3_REGION: ${S3_REGION:-garage}
+      S3_BUCKET_GOLD: ${S3_BUCKET_GOLD:-gold}
+      GOLD_LOCAL_DIR: ${GOLD_LOCAL_DIR:-/prefect/data/gold}
+    env_file: .env
+    volumes:
+      - ./dashboard:/app:z
