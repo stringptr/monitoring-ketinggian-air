@@ -115,6 +115,7 @@ services:
     volumes:
       - ./prefect/app:/prefect:z
       - ./scripts:/prefect/scripts:z
+      - ./tests:/prefect/tests:z
     command: >
       sh -c "prefect work-pool create local-pool --type process || true;
              prefect --no-prompt deploy --all &&

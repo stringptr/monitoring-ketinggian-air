@@ -110,6 +110,7 @@ def assemble(
     discharge_hourly: DataFrame | None,
     discharge_daily: DataFrame,
     meteo: DataFrame,
+    meteo_available: tuple[str, ...],
     settings: GoldSettings,
     version: str,
 ) -> DataFrame:
@@ -154,8 +155,9 @@ def assemble(
         lambda left, right: left + right,
         [
             F.when(F.col(column).isNotNull(), F.lit(1)).otherwise(F.lit(0))
-            for column in METEO_COLUMNS
-        ],
+            for column in meteo_available
+        ]
+        or [F.lit(0)],
     )
 
     return frame.select(
@@ -183,5 +185,6 @@ def assemble(
         grain.cast("string").alias("discharge_grain"),
         *METEO_COLUMNS,
         meteo_count.cast("long").alias("meteo_n"),
+        F.lit(len(meteo_available)).cast("long").alias("meteo_variables_available"),
         F.lit(version).cast("string").alias("dataset_version"),
     )

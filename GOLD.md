@@ -20,11 +20,48 @@ menggabung sendiri-sendiri, definisi jam lengkap dan cara menggeser data bisa
 berbeda.
 
 ```
-silver â”€â”€â–º gold/station_hourly â”€â”€â–º dashboard
-                â”‚
-                â”œâ”€â”€â–º gold/features â”€â”€â–º model â”€â”€â–º gold/predictions â”€â”€â–º dashboard
-                â””â”€â”€â–º gold/model_metrics â”€â”€â–º dashboard
+silver -> gold/station_hourly -> dashboard
+              |
+              +-> gold/features -> model -> gold/predictions -> dashboard
+              +-> gold/model_metrics -> dashboard
 ```
+
+## Urutan proses
+
+Satu run berjalan dengan urutan tetap, dan **tidak ada yang ditulis sebelum
+validasi lolos**:
+
+1. Baca silver untuk jendela yang diminta (dipotong ke hari terakhir yang
+   benar-benar punya data).
+2. Bentuk grid per jam, lalu tabel `station_hourly`.
+3. Bentuk `features` beserta target.
+4. Validasi keras: kolom lengkap, tidak kosong, tidak ada duplikat
+   `(station_id, time_utc)`. Kegagalan di sini menghentikan run tanpa menulis
+   apa pun.
+5. Jalankan pemeriksaan kualitas lunak dan siapkan laporan DQ.
+6. Tulis `station_hourly`, lalu `features`.
+7. Tulis laporan DQ.
+8. Terakhir, tulis satu baris di `gold/dataset_versions` dengan
+   `status=committed`. Baris ini adalah penanda bahwa run selesai; consumer
+   dapat mengabaikan run yang tidak pernah menulis penanda.
+
+S3 tidak menyediakan transaksi lintas objek, sehingga langkah 6 tidak bisa
+benar-benar atomik. Penanda pada langkah 8 adalah kompromi yang jujur: bila
+penulisan tabel kedua gagal, penanda tidak dibuat dan kondisi setengah jadi
+bisa dideteksi.
+
+## Versi dataset
+
+`dataset_version` adalah identitas **definisi** dataset, misalnya `g1-3f9c1a2b`.
+Nilainya berasal dari hash daftar fitur, target, jendela, rasio minimal sampel,
+ambang jam lengkap, horizon, dan zona waktu. Versi ini hanya berubah bila
+definisi berubah, bukan setiap hari.
+
+Informasi pemrosesan dicatat terpisah di `gold/dataset_versions`:
+`run_id`, `status`, `data_start_date`, `data_end_date`, `processed_at`, jumlah
+baris, jumlah baris siap latih, dan sumber debit. Model sebaiknya menyimpan
+`dataset_version` **dan** `data_end_date`, karena keduanya menjawab pertanyaan
+berbeda.
 
 ## Struktur output
 
@@ -34,13 +71,17 @@ gold/features/station_id=<site>/date_utc=<yyyy-mm-dd>/part-*.parquet
 gold/predictions/station_id=<site>/issue_date=<yyyy-mm-dd>/part-*.parquet
 gold/model_metrics/model_version=<v>/part-*.parquet
 gold/dataset_versions/part-*.parquet
-gold/_dq/table=features/date=<yyyy-mm-dd>/part-*.parquet
+gold/_dq/table=features/run_id=<run_id>/part-*.parquet
 ```
 
 `station_hourly` dan `features` dipartisi `station_id` + `date_utc`, sehingga
 run harian hanya menimpa hari UTC yang dihitungnya. Kolom `date_local` tetap
-tersedia untuk kebutuhan tampilan dan analisis musiman. `_dq` dipartisi per
-tanggal lokal.
+tersedia untuk kebutuhan tampilan dan analisis musiman.
+
+Laporan DQ disimpan per run, bukan per tanggal, karena pemeriksaan tingkat
+jendela tidak mewakili satu tanggal. Setiap baris punya `scope` (`date` atau
+`window`), `date` (hanya untuk scope `date`), `window_start`, dan
+`window_end`.
 
 ## Kolom `station_hourly`
 
@@ -50,7 +91,7 @@ tanggal lokal.
 | Ketinggian air | `stage_mean_ft`, `stage_max_ft`, `stage_min_ft`, `stage_n`, `stage_complete` |
 | Debit | `discharge_mean_cfs` (per jam, bila ada), `discharge_daily_cfs` (harian), `discharge_model_cfs` (yang dipakai fitur), `discharge_grain` |
 | Cuaca | `precip_mm`, `rain_mm`, `temp_c`, `rh_pct`, `dewpoint_c`, `soil_moist_0_7`, `soil_moist_7_28`, `soil_moist_28_100`, `et0_mm`, `wind_kmh`, `cloud_pct`, `swrad_wm2`, `pressure_hpa` |
-| Metadata | `meteo_n`, `dataset_version` |
+| Metadata | `meteo_n` (variabel terisi), `meteo_variables_available` (variabel yang tersedia di sumber), `dataset_version` |
 
 `stage_complete` bernilai benar bila satu jam memuat minimal 3 dari 4 sampel
 15 menit. Jam tanpa data tetap ada sebagai baris (grid penuh), dengan nilai
@@ -82,8 +123,11 @@ itu satu nilai dalam jendela 168 jam akan dianggap jendela penuh.
 # seluruh riwayat (perlu silver terisi)
 prefect deployment run 'gold-transform/gold-backfill'
 
-# jendela harian (7 hari terakhir, mengikuti GOLD_LOOKBACK_DAYS)
+# jendela harian gold saja (untuk rerun manual)
 prefect deployment run 'gold-transform/daily-gold'
+
+# rantai harian lengkap: bronze -> silver -> gold (jadwal 02.30 UTC)
+prefect deployment run 'daily-all/daily-all'
 
 # uji cepat satu bulan
 docker compose exec prefect-worker python -c \
@@ -92,7 +136,15 @@ docker compose exec prefect-worker python -c \
 
 # uji logika tanpa jaringan maupun data asli
 docker compose exec prefect-worker python /prefect/scripts/smoke_gold.py
+
+# test
+docker compose exec prefect-worker python -m pytest tests -q
 ```
+
+Hanya `daily-all` yang terjadwal. Deployment bronze, bronze+silver, dan gold
+lainnya tetap ada untuk dijalankan manual, tetapi jadwalnya dinonaktifkan agar
+tidak ada pekerjaan yang tumpang tindih dan gold tidak pernah membaca silver
+yang belum selesai.
 
 Tanpa object storage (`S3_ENDPOINT_URL` kosong), gold membaca dan menulis di
 `BRONZE_LOCAL_DIR` dengan struktur yang sama.
@@ -108,11 +160,14 @@ Tanpa object storage (`S3_ENDPOINT_URL` kosong), gold membaca dan menulis di
 2. **Titik embun belum ada.** `dew_point_2m` belum diambil pipeline, jadi
    `dewpoint_c` bernilai `null`. Kolom ini tidak dipakai model, sehingga tidak
    memengaruhi fitur; ia disediakan agar skema tidak berubah nanti.
+   `meteo_n` hanya menghitung variabel yang benar-benar tersedia, dan
+   `meteo_variables_available` mencatat jumlahnya (saat ini 12) agar angka itu
+   tidak disalahartikan sebagai kekurangan data.
 3. **Tekanan.** Pipeline mengambil `surface_pressure`, notebook memakai
    `pressure_msl`. Dipetakan ke `pressure_hpa` dan dicatat sebagai perbedaan
    semantik. Tidak dipakai model.
 4. **Periode.** Gold mengikuti silver; default `2015-10-01`. Notebook memakai
-   2007â€“2026 dan melatih 2011â€“2026. Selama silver belum diisi sejak 2007,
+   2007-2026 dan melatih 2011-2026. Selama silver belum diisi sejak 2007,
    hasil pelatihan dari gold tidak akan identik dengan notebook.
 5. **Gold dapat dibangun ulang penuh.** Tidak ada state tambahan; menjalankan
    ulang rentang yang sama menimpa partisi yang sama.
@@ -133,5 +188,6 @@ Skrip membandingkan setiap kolom fitur pada irisan waktu yang sama dan
 melaporkan selisih absolut maksimum. Target: di bawah `1e-6`. Selama debit
 masih harian, kolom `discharge_lag_*` akan berbeda dan skrip akan
 menandainya; itu sesuai dengan batasan nomor 1.
+
 
 

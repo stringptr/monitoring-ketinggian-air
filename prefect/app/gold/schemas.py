@@ -133,6 +133,7 @@ STAGE_HOURLY_SCHEMA = StructType(
     + [StructField(column, DoubleType()) for column in METEO_COLUMNS]
     + [
         StructField("meteo_n", LongType()),
+        StructField("meteo_variables_available", LongType()),
         StructField("dataset_version", StringType()),
     ]
 )
@@ -180,8 +181,11 @@ MODEL_METRICS_SCHEMA = StructType(
 DATASET_VERSIONS_SCHEMA = StructType(
     [
         StructField("dataset_version", StringType()),
-        StructField("start_date", StringType()),
-        StructField("end_date", StringType()),
+        StructField("run_id", StringType()),
+        StructField("status", StringType()),
+        StructField("data_start_date", StringType()),
+        StructField("data_end_date", StringType()),
+        StructField("processed_at", TimestampType()),
         StructField("max_time_utc", TimestampType()),
         StructField("rows_hourly", LongType()),
         StructField("rows_features", LongType()),
@@ -196,7 +200,10 @@ DQ_REPORT_SCHEMA = StructType(
     [
         StructField("run_id", StringType()),
         StructField("table", StringType()),
+        StructField("scope", StringType()),
         StructField("date", StringType()),
+        StructField("window_start", StringType()),
+        StructField("window_end", StringType()),
         StructField("station_id", StringType()),
         StructField("check_name", StringType()),
         StructField("severity", StringType()),

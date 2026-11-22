@@ -1,9 +1,16 @@
 """Data-quality checks for the gold layer.
 
-Gold checks different things from silver. Silver guards the source data; gold
-guards the joined dataset: is every hour present, are the hours actually
-complete, how much of each feature is missing, and how many rows are usable
-for training. Hard failures stop the flow before anything is written.
+Hard validation lives in ``gold/validation.py`` and runs before anything is
+written. This module only produces the report: it never raises on a soft or
+informational finding and it never writes the gold tables.
+
+Two kinds of checks are recorded separately:
+
+* ``scope="date"`` — the finding describes one local date (hours present,
+  complete hours, trainable rows on that date);
+* ``scope="window"`` — the finding describes the whole processed range
+  (feature null rate, trainable ratio), so it carries ``window_start`` and
+  ``window_end`` and leaves ``date`` empty.
 """
 
 from __future__ import annotations
@@ -17,39 +24,24 @@ from pyspark.sql import functions as F
 from gold.config import GoldSettings
 from gold.schemas import DQ_REPORT_SCHEMA, FEATURE_COLS, TARGET_COLS
 
-HARD = "hard"
 SOFT = "soft"
 INFO = "info"
+
+SCOPE_DATE = "date"
+SCOPE_WINDOW = "window"
 
 HOURS_PER_DAY = 24
 DEFAULT_MAX_NULL_RATIO = 0.20
 EDGE_DATE = "edge_date"
 
 
-class GoldQualityError(RuntimeError):
-    """Raised when a hard data-quality rule is violated."""
-
-
-def assert_columns(df: DataFrame, required: tuple[str, ...], table: str) -> None:
-    missing = [column for column in required if column not in df.columns]
-    if missing:
-        raise GoldQualityError(
-            f"{table}: missing columns {', '.join(sorted(missing))}"
-        )
-
-
-def assert_no_duplicates(df: DataFrame, keys: tuple[str, ...], table: str) -> None:
-    duplicates = df.groupBy(*keys).count().filter(F.col("count") > 1).limit(1).count()
-    if duplicates:
-        raise GoldQualityError(
-            f"{table}: duplicate keys on {', '.join(keys)}"
-        )
-
-
 def _result(
     run_id: str,
     table: str,
-    day: str,
+    scope: str,
+    day: str | None,
+    window_start: str | None,
+    window_end: str | None,
     station_id: str,
     check_name: str,
     severity: str,
@@ -60,7 +52,10 @@ def _result(
     return {
         "run_id": run_id,
         "table": table,
+        "scope": scope,
         "date": day,
+        "window_start": window_start,
+        "window_end": window_end,
         "station_id": station_id,
         "check_name": check_name,
         "severity": severity,
@@ -70,6 +65,14 @@ def _result(
         "details": json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _window_bounds(df: DataFrame) -> tuple[str, str]:
+    row = df.agg(
+        F.min("date_local").alias("first_day"),
+        F.max("date_local").alias("last_day"),
+    ).collect()[0]
+    return row["first_day"] or "", row["last_day"] or ""
 
 
 def _edge_dates(df: DataFrame) -> set[tuple[str, str]]:
@@ -119,6 +122,9 @@ def _daily_rows(
             _result(
                 run_id,
                 table,
+                SCOPE_DATE,
+                day,
+                day,
                 day,
                 station,
                 "hours_completeness",
@@ -132,6 +138,9 @@ def _daily_rows(
             _result(
                 run_id,
                 table,
+                SCOPE_DATE,
+                day,
+                day,
                 day,
                 station,
                 "stage_completeness",
@@ -150,6 +159,9 @@ def _daily_rows(
             _result(
                 run_id,
                 table,
+                SCOPE_DATE,
+                day,
+                day,
                 day,
                 station,
                 "trainable_rows",
@@ -166,7 +178,8 @@ def _feature_null_rows(
     df: DataFrame,
     run_id: str,
     table: str,
-    day: str,
+    window_start: str,
+    window_end: str,
 ) -> list[dict]:
     """Report how much of each feature column is null over the whole window."""
 
@@ -194,7 +207,10 @@ def _feature_null_rows(
         _result(
             run_id,
             table,
-            day,
+            SCOPE_WINDOW,
+            None,
+            window_start,
+            window_end,
             "all",
             "feature_null_rate",
             SOFT,
@@ -216,7 +232,8 @@ def _trainable_row(
     df: DataFrame,
     run_id: str,
     table: str,
-    day: str,
+    window_start: str,
+    window_end: str,
     settings: GoldSettings,
 ) -> list[dict]:
     total = df.count()
@@ -229,7 +246,10 @@ def _trainable_row(
         _result(
             run_id,
             table,
-            day,
+            SCOPE_WINDOW,
+            None,
+            window_start,
+            window_end,
             "all",
             "trainable_ratio",
             SOFT,
@@ -250,20 +270,19 @@ def run_checks(
     table: str,
     run_id: str,
     settings: GoldSettings,
-    required: tuple[str, ...],
 ) -> DataFrame:
-    """Run the gold checks and return them in the DQ report schema."""
+    """Run the soft checks and return them in the DQ report schema."""
 
-    assert_columns(df, required, table)
-    assert_no_duplicates(df, ("station_id", "time_utc"), table)
+    window_start, window_end = _window_bounds(df)
+    edges = _edge_dates(df) if window_start else set()
 
-    edges = _edge_dates(df)
-    latest_day = df.agg(F.max("date_local")).collect()[0][0]
-    day = latest_day or ""
-
-    rows = _daily_rows(df, run_id, table, edges)
-    rows += _feature_null_rows(df, run_id, table, day)
-    rows += _trainable_row(df, run_id, table, day, settings)
+    rows: list[dict] = []
+    if window_start:
+        rows += _daily_rows(df, run_id, table, edges)
+        rows += _feature_null_rows(df, run_id, table, window_start, window_end)
+        rows += _trainable_row(
+            df, run_id, table, window_start, window_end, settings
+        )
 
     if not rows:
         return spark.createDataFrame([], DQ_REPORT_SCHEMA)

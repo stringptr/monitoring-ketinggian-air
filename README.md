@@ -53,7 +53,8 @@ dan batasan ada di [GOLD.md](GOLD.md).
   pelatihan model.
 - gold/_dq: laporan kualitas data per tanggal.
 
-Deployment: `daily-gold` (03:00 UTC) dan `gold-backfill` (manual).
+Deployment: `daily-all` (02:30 UTC, bronze -> silver -> gold), `daily-gold`
+dan `gold-backfill` untuk run manual. Hanya `daily-all` yang terjadwal.
 
 ## Dashboard
 

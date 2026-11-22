@@ -255,18 +255,24 @@ def read_meteo(
     station: Station,
     start: datetime,
     end: datetime,
-) -> DataFrame:
-    """Read hourly weather and map the silver names to the canonical names."""
+) -> tuple[DataFrame, tuple[str, ...]]:
+    """Read hourly weather and map the silver names to the canonical names.
+
+    Returns the frame with the full canonical schema plus the list of variables
+    that actually exist in silver, so ``meteo_n`` is not diluted by columns the
+    source has never provided.
+    """
 
     paths = _paths(settings, SILVER_PREFIX_METEO, station, _day_range(start, end))
     df = _read(spark, paths)
     if df is None:
-        return _empty(
-            spark,
-            "station_id string, time_utc timestamp, "
-            + ", ".join(f"{column} double" for column in METEO_COLUMNS),
-        )
+        return _empty_meteo(spark), ()
 
+    available = tuple(
+        target
+        for source, target in METEO_SOURCE_MAP.items()
+        if source in df.columns
+    )
     filtered = df.filter(
         (F.col("time_utc") >= F.lit(start)) & (F.col("time_utc") <= F.lit(end))
     )
@@ -282,4 +288,12 @@ def read_meteo(
             else F.lit(None).cast("double").alias(target)
         )
 
-    return filtered.select(*selections)
+    return filtered.select(*selections), available
+
+
+def _empty_meteo(spark: SparkSession) -> DataFrame:
+    return _empty(
+        spark,
+        "station_id string, time_utc timestamp, "
+        + ", ".join(f"{column} double" for column in METEO_COLUMNS),
+    )

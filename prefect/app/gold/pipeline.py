@@ -13,7 +13,7 @@ from functools import reduce
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
-from silver.spark import build_spark_session
+from common.spark import build_spark_session
 from stations import get_stations
 
 from gold.config import (
@@ -40,9 +40,11 @@ from gold.readers import (
 )
 from gold.schemas import (
     DATASET_VERSIONS_SCHEMA,
-    FEATURES_SCHEMA,
     FEATURE_COLS,
+    METEO_COLUMNS,
 )
+from gold.validation import validate_features
+from gold.version import dataset_version
 from gold.writer import write_dataset_version, write_dq_report, write_table
 
 
@@ -109,6 +111,7 @@ def run_gold(
         discharge_hourly_frames: list[DataFrame] = []
         daily_frames: list[DataFrame] = []
         meteo_frames: list[DataFrame] = []
+        meteo_seen: set[str] = set()
 
         daily_start = (start_ts - timedelta(days=1)).date().isoformat()
         daily_end = (end_ts + timedelta(days=1)).date().isoformat()
@@ -127,9 +130,11 @@ def run_gold(
                     spark, settings, station, daily_start, daily_end
                 )
             )
-            meteo_frames.append(
-                read_meteo(spark, settings, station, start_ts, end_ts)
+            meteo_frame, meteo_variables = read_meteo(
+                spark, settings, station, start_ts, end_ts
             )
+            meteo_frames.append(meteo_frame)
+            meteo_seen.update(meteo_variables)
 
         stage = _union(stage_frames)
         discharge_daily = _union(daily_frames)
@@ -168,6 +173,7 @@ def run_gold(
             discharge_hourly,
             discharge_daily,
             meteo,
+            tuple(column for column in METEO_COLUMNS if column in meteo_seen),
             settings,
             end_date,
         )
@@ -177,13 +183,18 @@ def run_gold(
         hourly_window = _window_filter(hourly, start_date, end_date)
         features_window = _window_filter(features, start_date, end_date)
 
-        max_date_local = features_window.agg(F.max("date_local")).collect()[0][0]
-        version = max_date_local or end_date
-        hourly_window = hourly_window.withColumn(
-            "dataset_version", F.lit(version)
-        )
-        features_window = features_window.withColumn(
-            "dataset_version", F.lit(version)
+        version = dataset_version()
+        hourly_window = hourly_window.withColumn("dataset_version", F.lit(version))
+        features_window = features_window.withColumn("dataset_version", F.lit(version))
+
+        # Validate before publishing: a hard failure here leaves storage untouched.
+        validate_features(features_window, TABLE_FEATURES)
+        dq = run_checks(
+            spark,
+            features_window,
+            TABLE_FEATURES,
+            identifier,
+            settings,
         )
 
         write_table(
@@ -200,33 +211,29 @@ def run_gold(
             TABLE_FEATURES,
             partition_cols=("station_id", "date_utc"),
         )
-
-        dq = run_checks(
-            spark,
-            features_window,
-            TABLE_FEATURES,
-            identifier,
-            settings,
-            tuple(FEATURES_SCHEMA.names),
-        )
         write_dq_report(spark, dq, settings, TABLE_FEATURES)
 
         rows_hourly = hourly_window.count()
         rows_features = features_window.count()
         rows_trainable = features_window.filter(F.col("is_trainable")).count()
         grain = _grain_label(features_window)
+        processed_at = datetime.now(timezone.utc)
 
+        # Written last: its presence marks the run as committed for consumers.
         summary_row = {
             "dataset_version": version,
-            "start_date": start_date,
-            "end_date": end_date,
+            "run_id": identifier,
+            "status": "committed",
+            "data_start_date": start_date,
+            "data_end_date": end_date,
+            "processed_at": processed_at,
             "max_time_utc": features_window.agg(F.max("time_utc")).collect()[0][0],
             "rows_hourly": rows_hourly,
             "rows_features": rows_features,
             "rows_trainable": rows_trainable,
             "feature_count": len(FEATURE_COLS),
             "discharge_grain": grain,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": processed_at,
         }
         write_dataset_version(
             spark,

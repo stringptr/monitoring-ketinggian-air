@@ -11,7 +11,7 @@ features and never calls the model directly.
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -50,8 +50,13 @@ def _filesystem():
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def load_table(name: str) -> pd.DataFrame:
-    """Read one gold table as a pandas frame, empty when it does not exist."""
+def _read_table(
+    name: str,
+    since_column: str | None = None,
+    since: str | None = None,
+    columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Read a gold table with filter pushdown, empty when it does not exist."""
 
     import pyarrow.dataset as ds
     import pyarrow.fs as pafs
@@ -66,17 +71,67 @@ def load_table(name: str) -> pd.DataFrame:
         dataset = ds.dataset(
             path, filesystem=filesystem, format="parquet", partitioning="hive"
         )
-        frame = dataset.to_table().to_pandas()
+        expression = None
+        if since_column and since:
+            expression = ds.field(since_column) >= since
+        frame = dataset.to_table(
+            filter=expression, columns=list(columns) if columns else None
+        ).to_pandas()
     except Exception:  # noqa: BLE001 - the dashboard must stay alive
         return pd.DataFrame()
 
-    for column in ("station_id", "dataset_version", "discharge_grain"):
+    for column in ("station_id", "dataset_version", "discharge_grain", "status"):
         if column in frame.columns:
             frame[column] = frame[column].astype(str)
-    for column in ("time_utc", "time_local", "issued_at", "target_time"):
+    for column in (
+        "time_utc",
+        "time_local",
+        "issued_at",
+        "target_time",
+        "processed_at",
+        "created_at",
+    ):
         if column in frame.columns:
             frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce")
     return frame
+
+
+HOURLY_COLUMNS = (
+    "station_id",
+    "time_utc",
+    "time_local",
+    "date_utc",
+    "date_local",
+    "stage_mean_ft",
+    "stage_complete",
+    "precip_mm",
+    "discharge_grain",
+    "dataset_version",
+)
+
+PREDICTION_COLUMNS = (
+    "station_id",
+    "issued_at",
+    "target_time",
+    "horizon",
+    "y_pred",
+    "y_obs",
+    "model_version",
+)
+
+
+def load_hourly(since: str) -> pd.DataFrame:
+    return _read_table(
+        "station_hourly", "date_utc", since, HOURLY_COLUMNS
+    )
+
+
+def load_predictions(since: str) -> pd.DataFrame:
+    return _read_table("predictions", "issue_date", since, PREDICTION_COLUMNS)
+
+
+def load_runs() -> pd.DataFrame:
+    return _read_table("dataset_versions")
 
 
 def _local(frame: pd.DataFrame, column: str = "time_utc") -> pd.DataFrame:
@@ -189,8 +244,17 @@ def _hydrograph(station_hourly: pd.DataFrame, station: str) -> go.Figure:
 def main() -> None:
     st.set_page_config(page_title="Monitoring Ketinggian Air", layout="wide")
 
-    hourly = load_table("station_hourly")
-    predictions = load_table("predictions")
+    since = (
+        datetime.now(timezone.utc).date() - timedelta(days=DEFAULT_WINDOW_DAYS * 4)
+    ).isoformat()
+
+    runs = load_runs()
+    hourly = load_hourly(since)
+    predictions = load_predictions(since)
+
+    latest_run = None
+    if not runs.empty and "processed_at" in runs.columns:
+        latest_run = runs.sort_values("processed_at").iloc[-1]
 
     st.title("Monitoring Ketinggian Air")
     st.caption(
@@ -198,10 +262,16 @@ def main() -> None:
         "Panel utama adalah hasil prediksi model."
     )
 
+    if latest_run is not None and str(latest_run.get("status", "")) != "committed":
+        st.warning(
+            "Run gold terakhir belum berstatus committed. Data bisa belum sinkron "
+            "sampai run berikutnya selesai."
+        )
+
     if hourly.empty:
         st.warning(
             "Tabel `gold/station_hourly` belum ada. Jalankan gold lebih dulu: "
-            "`prefect deployment run 'gold-backfill/gold-backfill'`."
+            "`prefect deployment run 'gold-transform/gold-backfill'`."
         )
         return
 
@@ -256,10 +326,17 @@ def main() -> None:
         "Waktu data terakhir",
         latest_time.tz_convert(TIMEZONE).strftime("%d %b %H:%M") if pd.notna(latest_time) else "—",
     )
-    columns[3].metric(
-        "Versi dataset",
-        str(station_hourly["dataset_version"].dropna().max() or "—"),
+    version = (
+        str(latest_run["dataset_version"])
+        if latest_run is not None and "dataset_version" in latest_run
+        else str(station_hourly["dataset_version"].dropna().max() or "-")
     )
+    data_end = (
+        str(latest_run["data_end_date"])
+        if latest_run is not None and "data_end_date" in latest_run
+        else "-"
+    )
+    columns[3].metric("Versi dataset", version, f"data s/d {data_end}")
 
     st.plotly_chart(
         _prediction_chart(observed, window_predictions, station, int(horizon)),

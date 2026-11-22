@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
 
 from gold.config import TABLE_DQ, GoldSettings, local_uri
 
@@ -52,21 +51,16 @@ def write_dq_report(
     settings: GoldSettings,
     table: str,
 ) -> str | None:
+    """Write one report per run so window-level checks keep their range."""
+
     if _is_empty(df):
         return None
 
-    prepared = df.withColumn(
-        "date",
-        F.when(
-            F.col("date").isNull() | (F.col("date") == ""),
-            F.lit("unknown"),
-        ).otherwise(F.col("date")),
-    )
     path = table_path(settings, f"{TABLE_DQ}/table={table}")
     (
-        prepared.repartition("date")
+        df.repartition("run_id")
         .write.mode("overwrite")
-        .partitionBy("date")
+        .partitionBy("run_id")
         .parquet(path)
     )
     return path
@@ -78,15 +72,11 @@ def write_dataset_version(
     settings: GoldSettings,
     table: str,
 ) -> str | None:
-    """Write one row per dataset version, overwriting that version on rerun."""
+    """Append one row per run; written last, so it marks a committed run."""
 
     if _is_empty(df):
         return None
 
     path = table_path(settings, table)
-    (
-        df.write.mode("overwrite")
-        .partitionBy("dataset_version")
-        .parquet(path)
-    )
+    df.write.mode("append").parquet(path)
     return path
