@@ -39,16 +39,23 @@ validasi lolos**:
    `(station_id, time_utc)`. Kegagalan di sini menghentikan run tanpa menulis
    apa pun.
 5. Jalankan pemeriksaan kualitas lunak dan siapkan laporan DQ.
-6. Tulis `station_hourly`, lalu `features`.
-7. Tulis laporan DQ.
-8. Terakhir, tulis satu baris di `gold/dataset_versions` dengan
+6. Tulis kedua tabel ke area staging `gold/_staging/run_id=<id>/`.
+7. Setelah kedua penulisan berhasil, ganti partisi tujuan dengan file staging
+   (partisi dihapus lebih dulu agar file dari run sebelumnya tidak tertinggal,
+   karena nama file Spark berbeda setiap run) lalu hapus area staging. Hanya
+   file `.parquet` yang disalin; *directory marker* 0 byte dari Spark diabaikan
+   dan marker lama di level stasiun dibersihkan, karena pyarrow membacanya
+   sebagai file parquet kosong.
+8. Tulis laporan DQ.
+9. Terakhir, tulis satu baris di `gold/dataset_versions` dengan
    `status=committed`. Baris ini adalah penanda bahwa run selesai; consumer
    dapat mengabaikan run yang tidak pernah menulis penanda.
 
-S3 tidak menyediakan transaksi lintas objek, sehingga langkah 6 tidak bisa
-benar-benar atomik. Penanda pada langkah 8 adalah kompromi yang jujur: bila
-penulisan tabel kedua gagal, penanda tidak dibuat dan kondisi setengah jadi
-bisa dideteksi.
+S3 tidak menyediakan transaksi lintas objek, sehingga langkah 7 tidak bisa
+benar-benar atomik. Staging mempersempit jendela kegagalan: bila penulisan
+salah satu tabel gagal, tidak ada file yang disalin sama sekali. Bila
+penyalinan terputus di tengah, penanda tidak dibuat sehingga kondisi setengah
+jadi dapat dideteksi, dan file staging yang tersisa bisa diperiksa.
 
 ## Versi dataset
 

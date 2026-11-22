@@ -19,6 +19,7 @@ RUN uv pip install --no-cache \
     "pyarrow>=17" \
     "pandera>=0.26,<0.37" \
     "pytest>=8" \
+    "lightgbm>=4.5" \
     "tzdata"
 
 ARG HADOOP_AWS_VERSION=3.4.1

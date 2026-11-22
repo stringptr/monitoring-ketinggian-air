@@ -18,16 +18,19 @@ dan silver dikerjakan terpisah dan tidak diubah oleh pekerjaan ini.
 | Orkestrasi (deployment `daily-all`) | Selesai, bronze -> silver -> gold dalam satu run |
 | Dashboard Streamlit | Berjalan, panel prediksi menunggu `gold/predictions` |
 | Inference prediksi | Skrip siap, butuh model Yuda (`data/models`) |
-| Automated test | `tests/` (pytest): spesifikasi cepat + validasi Spark |
+| Automated test | `tests/` (pytest): spesifikasi, validasi Spark, publish staging (10 test) |
 
 ## Perbaikan setelah code review (22 Nov)
 
 1. **Validasi sebelum tulis.** `gold/validation.py` memeriksa kolom, baris
    kosong, dan duplikat `(station_id, time_utc)` sebelum tabel ditulis. Sebelum
    ini pemeriksaan berjalan setelah `write_table`.
-2. **Penanda run.** `gold/dataset_versions` ditulis terakhir dengan
-   `status=committed`. Bila penulisan tabel gagal, penanda tidak dibuat, dan
-   dashboard menampilkan peringatan.
+2. **Penanda run + staging.** Kedua tabel ditulis ke
+   `gold/_staging/run_id=<id>/` lebih dulu; hanya bila keduanya berhasil,
+   partisi tujuan dihapus lalu diganti file staging (mencegah duplikat karena
+   nama file Spark berubah tiap run). `gold/dataset_versions` ditulis terakhir
+   dengan `status=committed`. Bila ada langkah yang gagal, penanda tidak dibuat
+   dan dashboard menampilkan peringatan.
 3. **Versi dataset.** `dataset_version` sekarang hash definisi (`g1-xxxxxxxx`),
    bukan tanggal data. Rentang data dicatat terpisah (`data_start_date`,
    `data_end_date`, `processed_at`, `run_id`).
@@ -59,7 +62,7 @@ dan silver dikerjakan terpisah dan tidak diubah oleh pekerjaan ini.
 | `prefect/app/gold/hourly.py` | Grid per jam, rollup 15 menit, join debit dan cuaca |
 | `prefect/app/gold/features.py` | Fitur dan target dengan jendela 90 persen |
 | `prefect/app/gold/quality.py` | Pemeriksaan kelengkapan jam, nilai kosong, trainable |
-| `prefect/app/gold/writer.py` | Penulisan idempoten per `station_id` + `date_utc` |
+| `prefect/app/gold/writer.py` | Staging, publish ke partisi final, DQ, penanda run |
 | `prefect/app/gold/pipeline.py` | Orkestrasi satu run gold |
 | `prefect/app/flows/gold_flow.py` | Flow Prefect `gold-transform` |
 | `prefect/app/prefect.yaml` | Deployment `daily-all` (02.30 UTC), `daily-gold`, dan `gold-backfill` |
@@ -74,7 +77,7 @@ dan silver dikerjakan terpisah dan tidak diubah oleh pekerjaan ini.
 | `prefect/app/gold/version.py` | Identitas definisi dataset (`g1-xxxxxxxx`) |
 | `prefect/app/common/spark.py` | Spark session bersama untuk semua layer |
 | `prefect/app/flows/daily_all.py` | Rantai harian bronze -> silver -> gold |
-| `tests/test_gold_spec.py`, `tests/test_gold_validation.py` | Test cepat dan test validasi Spark |
+| `tests/test_gold_spec.py`, `tests/test_gold_validation.py`, `tests/test_gold_publish.py` | Test cepat, validasi Spark, dan publish staging |
 | `GOLD.md` | Dokumentasi teknis lapisan gold |
 
 ## Hasil uji pada data asli

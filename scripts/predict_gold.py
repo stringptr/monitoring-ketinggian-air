@@ -5,10 +5,10 @@ in ``data/models``. This script loads the latest gold features, applies each
 model, adds ``stage_now`` back (the models predict a delta) and appends the
 result to ``gold/predictions``, which is the table the dashboard reads.
 
-Run where ``lightgbm`` is installed, for example inside the worker after
-``pip install lightgbm``:
+Run where ``lightgbm`` and the gold tables are reachable, for example inside
+the worker:
 
-    python scripts/predict_gold.py --models-dir data/models --days 7
+    python /prefect/scripts/predict_gold.py --models-dir /prefect/models --days 7
 """
 
 from __future__ import annotations
