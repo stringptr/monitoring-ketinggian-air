@@ -36,14 +36,24 @@ Perbedaan trainable dibanding versi daily terlihat jelas: dengan daily, jendela
 6 hari hanya menghasilkan 360 baris trainable karena debit hari terakhir belum
 tersedia. Dengan hourly, seluruh 432 baris trainable.
 
+## Backfill
+
+- Bronze `00060` continuous: 12.183 partisi (4.061 hari x 3 stasiun) untuk
+  2015-10-01 sampai 2026-11-22.
+- Silver 2015-2026: dihentikan setelah 2020. Lingkungan lokal hanya untuk
+  provisioning; backfill penuh akan dijalankan di Azure dengan Delta dan
+  partisi yang lebih kasar.
+- Gold lokal: 2026-11-05 sampai 2026-11-22 untuk demo dashboard dan prediksi.
+- Data silver 2015-2020 dibiarkan sebagai artefak uji, tidak dipakai untuk
+  demo maupun training lokal.
+
 ## Yang belum selesai
 
-- Backfill historis `00060` continuous untuk seluruh periode. Saat ini baru
-  sepuluh hari untuk pengujian.
-- Backfill silver dan gold 2015-2026 sebelum training dari gold.
+- Backfill silver dan gold 2015-2026 di Azure sebelum training produksi.
 - Training dan retrain terjadwal, lalu MLflow.
 - Regenerasi prediksi setelah gold memakai debit per jam.
 - Migrasi Delta Lake untuk gold dan silver.
+- Optimasi partisi dan `cache()` untuk backfill historis.
 
 ## Catatan
 
