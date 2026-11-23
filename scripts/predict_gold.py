@@ -21,78 +21,43 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
-GOLD_BUCKET = os.getenv("S3_BUCKET_GOLD", "gold")
-GOLD_LOCAL_DIR = os.getenv("GOLD_LOCAL_DIR", "/prefect/data/gold")
+for _candidate in (
+    Path("/prefect"),
+    Path(__file__).resolve().parents[1] / "prefect" / "app",
+):
+    if (_candidate / "gold").is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+        break
+
+from gold.config import GoldSettings
+from gold.delta import read_delta, write_delta
+
 MODEL_VERSION_FALLBACK = "local"
 
 
-def _dataset(name: str):
-    import pyarrow.dataset as ds
-    import pyarrow.fs as pafs
-    from urllib.parse import urlparse
-
-    endpoint = os.getenv("S3_ENDPOINT_URL", "").strip()
-    if not endpoint:
-        filesystem = pafs.LocalFileSystem()
-        path = f"{GOLD_LOCAL_DIR}/{name}"
-    else:
-        parsed = urlparse(endpoint)
-        filesystem = pafs.S3FileSystem(
-            access_key=os.getenv("GARAGE_DEFAULT_ACCESS_KEY", ""),
-            secret_key=os.getenv("GARAGE_DEFAULT_SECRET_KEY", ""),
-            endpoint_override=parsed.netloc,
-            scheme=parsed.scheme or "http",
-            region=os.getenv("S3_REGION", "garage"),
-        )
-        path = f"{GOLD_BUCKET}/{name}"
-
-    if filesystem.get_file_info(path).type == pafs.FileType.NotFound:
-        raise SystemExit(f"{path} not found; run gold first")
-    return ds.dataset(
-        path, filesystem=filesystem, format="parquet", partitioning="hive"
+def _write_predictions(
+    settings: GoldSettings, frame: pd.DataFrame
+) -> int:
+    issue_dates = pd.to_datetime(frame["issue_date"], utc=True)
+    predicate = (
+        f"issue_date >= '{issue_dates.min().date().isoformat()}' "
+        f"AND issue_date <= '{issue_dates.max().date().isoformat()}'"
     )
-
-
-def _write_predictions(frame: pd.DataFrame) -> int:
-    import pyarrow as pa
-    import pyarrow.dataset as ds
-    import pyarrow.fs as pafs
-    from urllib.parse import urlparse
-
-    table = pa.Table.from_pandas(frame, preserve_index=False)
-    endpoint = os.getenv("S3_ENDPOINT_URL", "").strip()
-    if not endpoint:
-        filesystem = pafs.LocalFileSystem()
-        root = f"{GOLD_LOCAL_DIR}/predictions"
-    else:
-        parsed = urlparse(endpoint)
-        filesystem = pafs.S3FileSystem(
-            access_key=os.getenv("GARAGE_DEFAULT_ACCESS_KEY", ""),
-            secret_key=os.getenv("GARAGE_DEFAULT_SECRET_KEY", ""),
-            endpoint_override=parsed.netloc,
-            scheme=parsed.scheme or "http",
-            region=os.getenv("S3_REGION", "garage"),
-        )
-        root = f"{GOLD_BUCKET}/predictions"
-
-    ds.write_dataset(
-        table,
-        base_dir=root,
-        filesystem=filesystem,
-        format="parquet",
-        partitioning=["station_id", "issue_date"],
-        # The dashboard reads with the hive flavour, so the keys must be in the
-        # path (station_id=.../issue_date=...), not only in the directory name.
-        partitioning_flavor="hive",
-        existing_data_behavior="delete_matching",
+    write_delta(
+        frame,
+        settings,
+        "predictions",
+        mode="overwrite",
+        predicate=predicate,
+        partition_by=["station_id", "issue_date"],
     )
-    return len(table)
+    return len(frame)
 
 
 def main() -> int:
@@ -105,6 +70,7 @@ def main() -> int:
 
     import lightgbm as lgb
 
+    settings = GoldSettings.from_env()
     metadata_path = args.models_dir / "metadata.json"
     if not metadata_path.exists():
         raise SystemExit(f"{metadata_path} not found; run the notebook first")
@@ -114,7 +80,7 @@ def main() -> int:
     if args.horizon:
         metadata = [item for item in metadata if item["horizon"] in args.horizon]
 
-    features = _dataset("features").to_table().to_pandas()
+    features = read_delta(settings, "features")
     features["time_utc"] = pd.to_datetime(features["time_utc"], utc=True)
     since = features["time_utc"].max() - timedelta(days=args.days)
     features = features[features["time_utc"] >= since]
@@ -174,7 +140,7 @@ def main() -> int:
         return 1
 
     combined = pd.concat(records, ignore_index=True)
-    written = _write_predictions(combined)
+    written = _write_predictions(settings, combined)
     print(f"wrote {written} prediction rows for {len(records)} model(s)")
     return 0
 

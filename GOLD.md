@@ -21,10 +21,10 @@ menggabung sendiri-sendiri, definisi jam lengkap dan cara menggeser data bisa
 berbeda.
 
 ```
-silver -> gold/station_hourly -> dashboard
+silver -> gold/delta/station_hourly -> dashboard
               |
-              +-> gold/features -> model -> gold/predictions -> dashboard
-              +-> gold/model_metrics -> dashboard
+              +-> gold/delta/features -> model -> gold/delta/predictions -> dashboard
+              +-> gold/delta/model_metrics -> dashboard
 ```
 
 ## Urutan proses
@@ -40,23 +40,19 @@ validasi lolos**:
    `(station_id, time_utc)`. Kegagalan di sini menghentikan run tanpa menulis
    apa pun.
 5. Jalankan pemeriksaan kualitas lunak dan siapkan laporan DQ.
-6. Tulis kedua tabel ke area staging `gold/_staging/run_id=<id>/`.
-7. Setelah kedua penulisan berhasil, ganti partisi tujuan dengan file staging
-   (partisi dihapus lebih dulu agar file dari run sebelumnya tidak tertinggal,
-   karena nama file Spark berbeda setiap run) lalu hapus area staging. Hanya
-   file `.parquet` yang disalin; *directory marker* 0 byte dari Spark diabaikan
-   dan marker lama di level stasiun dibersihkan, karena pyarrow membacanya
-   sebagai file parquet kosong.
-8. Tulis laporan DQ.
-9. Terakhir, tulis satu baris di `gold/dataset_versions` dengan
+6. Tulis `station_hourly` dan `features` sebagai tabel Delta dengan
+   `mode=overwrite` dan predicate `date_utc` sesuai jendela. Delta membuat
+   commit atomik per tabel, jadi tidak ada lagi staging dan salin file.
+7. Tulis laporan DQ sebagai Parquet, terpisah dari tabel gold.
+8. Terakhir, append satu baris ke `gold/delta/dataset_versions` dengan
    `status=committed`. Baris ini adalah penanda bahwa run selesai; consumer
    dapat mengabaikan run yang tidak pernah menulis penanda.
 
-S3 tidak menyediakan transaksi lintas objek, sehingga langkah 7 tidak bisa
-benar-benar atomik. Staging mempersempit jendela kegagalan: bila penulisan
-salah satu tabel gagal, tidak ada file yang disalin sama sekali. Bila
-penyalinan terputus di tengah, penanda tidak dibuat sehingga kondisi setengah
-jadi dapat dideteksi, dan file staging yang tersisa bisa diperiksa.
+Delta dipakai melalui `delta-rs`. Spark Delta tidak dipakai di lokal karena
+S3A di Garage mengembalikan HTTP 400 saat membaca `_last_checkpoint`, bukan
+404. `delta-rs` menangani object store dengan `AWS_S3_ALLOW_UNSAFE_RENAME`,
+aman untuk penulis tunggal. Di Azure, tabel yang sama dapat dibaca oleh Spark
+Delta di atas ADLS.
 
 ## Versi dataset
 
@@ -67,7 +63,7 @@ ambang jam lengkap, horizon, zona waktu, dan sumber debit (`hourly` atau
 nama kolomnya sama. Versi ini hanya berubah bila definisi berubah, bukan setiap
 hari.
 
-Informasi pemrosesan dicatat terpisah di `gold/dataset_versions`:
+Informasi pemrosesan dicatat terpisah di `gold/delta/dataset_versions`:
 `run_id`, `status`, `data_start_date`, `data_end_date`, `processed_at`, jumlah
 baris, jumlah baris siap latih, dan sumber debit. Model sebaiknya menyimpan
 `dataset_version` **dan** `data_end_date`, karena keduanya menjawab pertanyaan
@@ -76,17 +72,19 @@ berbeda.
 ## Struktur output
 
 ```
-gold/station_hourly/station_id=<site>/date_utc=<yyyy-mm-dd>/part-*.parquet
-gold/features/station_id=<site>/date_utc=<yyyy-mm-dd>/part-*.parquet
-gold/predictions/station_id=<site>/issue_date=<yyyy-mm-dd>/part-*.parquet
-gold/model_metrics/model_version=<v>/part-*.parquet
-gold/dataset_versions/part-*.parquet
-gold/_dq/table=features/run_id=<run_id>/part-*.parquet
+gold/delta/station_hourly/          Delta, partisi station_id + date_utc
+gold/delta/features/                Delta, partisi station_id + date_utc
+gold/delta/predictions/             Delta, partisi station_id + issue_date
+gold/delta/model_metrics/           Delta, snapshot metrik terbaru
+gold/delta/dataset_versions/        Delta, satu baris per run
+gold/_dq/table=features/run_id=<id>/part-*.parquet
 ```
 
-`station_hourly` dan `features` dipartisi `station_id` + `date_utc`, sehingga
-run harian hanya menimpa hari UTC yang dihitungnya. Kolom `date_local` tetap
-tersedia untuk kebutuhan tampilan dan analisis musiman.
+Setiap tabel Delta memiliki `_delta_log`, sehingga versi sebelumnya bisa
+dibaca dengan time travel. `station_hourly` dan `features` dipartisi
+`station_id` + `date_utc`, sehingga run harian hanya menimpa hari UTC yang
+dihitungnya. Kolom `date_local` tetap tersedia untuk tampilan dan analisis
+musiman.
 
 Laporan DQ disimpan per run, bukan per tanggal, karena pemeriksaan tingkat
 jendela tidak mewakili satu tanggal. Setiap baris punya `scope` (`date` atau
@@ -209,7 +207,7 @@ features_complete_<station>.parquet`:
 
 ```sh
 python scripts/parity_check.py \
-  --gold data/gold/features \
+  --gold data/gold/delta/features \
   --notebook data/processed/features_complete_11150500.parquet \
   --station 11150500
 ```

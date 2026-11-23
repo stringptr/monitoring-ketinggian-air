@@ -22,6 +22,7 @@ RUN uv pip install --no-cache \
     "lightgbm>=4.5" \
     "scikit-learn>=1.5" \
     "mlflow>=2.20" \
+    "deltalake>=1.7" \
     "tzdata"
 
 ARG HADOOP_AWS_VERSION=3.4.1

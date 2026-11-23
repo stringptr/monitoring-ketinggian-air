@@ -3,6 +3,10 @@
 Catatan pekerjaan bagian **Gold + Dashboard** (Vio). Bagian ingestion, bronze,
 dan silver dikerjakan terpisah dan tidak diubah oleh pekerjaan ini.
 
+> Catatan: sejak branch `feat/delta-gold`, tabel gold memakai Delta Lake.
+> Bagian staging Parquet di dokumen ini adalah catatan historis. Lihat
+> `docs/progress-delta-gold.md` untuk keadaan terbaru.
+
 - Branch: `feat/gold-dashboard`
 - Basis: `dev` (`9cd06a1`, merge PR silver)
 - Status: gold selesai dan teruji pada data asli; dashboard berjalan; tabel

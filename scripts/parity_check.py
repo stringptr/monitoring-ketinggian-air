@@ -6,7 +6,7 @@ introduced by a pipeline change is caught before a model is retrained.
 
 Example:
     python scripts/parity_check.py \
-        --gold data/gold/features \
+        --gold data/gold/delta/features \
         --notebook data/processed/features_complete_11150500.parquet \
         --station 11150500
 """
@@ -43,7 +43,12 @@ KNOWN_DIFFERENCES = ("discharge_lag_1", "discharge_lag_3", "discharge_lag_6",
 
 
 def load_gold(path: Path, station: str) -> pd.DataFrame:
-    frame = pd.read_parquet(path)
+    try:
+        from deltalake import DeltaTable
+
+        frame = DeltaTable(str(path)).to_pandas()
+    except Exception:
+        frame = pd.read_parquet(path)
     if "station_id" in frame.columns:
         frame = frame[frame["station_id"].astype(str) == station]
     frame["time_utc"] = pd.to_datetime(frame["time_utc"], utc=True)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from gold.delta import write_delta
 from training.config import TrainingSettings
 
 
@@ -24,39 +25,13 @@ def _s3(settings: TrainingSettings):
 
 
 def write_metrics(frame: pd.DataFrame, settings: TrainingSettings) -> str:
-    """Write one metrics partition per model version."""
+    """Write the current metrics snapshot as a Delta table.
 
-    import pyarrow as pa
-    import pyarrow.dataset as ds
-    import pyarrow.fs as pafs
-    from urllib.parse import urlparse
+    MLflow keeps the historical runs; this table is the latest snapshot used by
+    the serving side.
+    """
 
-    table = pa.Table.from_pandas(frame, preserve_index=False)
-
-    if settings.s3_endpoint_url:
-        parsed = urlparse(settings.s3_endpoint_url)
-        filesystem = pafs.S3FileSystem(
-            access_key=settings.access_key,
-            secret_key=settings.secret_key,
-            endpoint_override=parsed.netloc,
-            scheme=parsed.scheme or "http",
-            region=settings.s3_region,
-        )
-        root = f"{settings.s3_bucket_gold}/model_metrics"
-    else:
-        filesystem = pafs.LocalFileSystem()
-        root = str(Path(settings.local_output_dir) / "gold" / "model_metrics")
-
-    ds.write_dataset(
-        table,
-        base_dir=root,
-        filesystem=filesystem,
-        format="parquet",
-        partitioning=["model_version"],
-        partitioning_flavor="hive",
-        existing_data_behavior="delete_matching",
-    )
-    return f"{root}/model_version=*"
+    return write_delta(frame, settings, "model_metrics", mode="overwrite")
 
 
 def write_models(
