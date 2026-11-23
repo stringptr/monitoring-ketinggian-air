@@ -59,7 +59,8 @@ def _result(
         "station_id": station_id,
         "check_name": check_name,
         "severity": severity,
-        "passed": int(failed_count) == 0,
+        # Informational findings are recorded, not treated as failures.
+        "passed": True if severity == INFO else int(failed_count) == 0,
         "failed_count": int(failed_count),
         "total_count": int(total_count),
         "details": json.dumps(details or {}, ensure_ascii=False, sort_keys=True),

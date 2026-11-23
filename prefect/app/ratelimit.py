@@ -2,12 +2,14 @@
 
 USGS allows at most 1000 requests per hour and Open-Meteo at most 5000. A
 ``RateLimiter`` enforces a minimum spacing between calls which guarantees the
-rolling-hour quota is never exceeded. ``get_json`` additionally honours HTTP
-429 responses via the ``Retry-After`` header.
+rolling-hour quota is never exceeded. ``get_json`` retries HTTP 429 through the
+``Retry-After`` header, and retries 5xx plus transient network failures with
+exponential backoff, because the free upstream APIs have no uptime guarantee.
 """
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 from typing import Any
@@ -19,7 +21,19 @@ USGS_REQUESTS_PER_HOUR = 1_000
 OPEN_METEO_REQUESTS_PER_HOUR = 5_000
 
 DEFAULT_TIMEOUT = 180
-DEFAULT_MAX_429_RETRIES = 5
+DEFAULT_MAX_RETRIES = 5
+RETRYABLE_STATUS = frozenset({500, 502, 503, 504})
+RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with jitter, capped at one minute."""
+
+    return min(60.0, 2.0**attempt) + random.uniform(0.0, 1.0)
 
 
 class RateLimiter:
@@ -48,16 +62,30 @@ def get_json(
     params: dict | None = None,
     headers: dict | None = None,
     timeout: int = DEFAULT_TIMEOUT,
-    max_429_retries: int = DEFAULT_MAX_429_RETRIES,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> Any:
-    """GET ``url`` (throttled) and return the decoded JSON body."""
+    """GET ``url`` (throttled) and return the decoded JSON body.
+
+    Retries throttling (429), upstream overload (5xx) and transient network
+    failures. The upstream APIs are free services without an uptime guarantee,
+    so a single 503 must not fail a whole daily run.
+    """
 
     attempt = 0
     while True:
         limiter.wait()
-        response = requests.get(url, params=params, headers=headers, timeout=timeout)
+        try:
+            response = requests.get(
+                url, params=params, headers=headers, timeout=timeout
+            )
+        except RETRYABLE_EXCEPTIONS:
+            if attempt >= max_retries:
+                raise
+            attempt += 1
+            time.sleep(backoff_seconds(attempt))
+            continue
 
-        if response.status_code == 429 and attempt < max_429_retries:
+        if response.status_code == 429 and attempt < max_retries:
             attempt += 1
             retry_after = response.headers.get("Retry-After")
             try:
@@ -65,6 +93,11 @@ def get_json(
             except (TypeError, ValueError):
                 delay = 60.0
             time.sleep(max(delay, 1.0))
+            continue
+
+        if response.status_code in RETRYABLE_STATUS and attempt < max_retries:
+            attempt += 1
+            time.sleep(backoff_seconds(attempt))
             continue
 
         response.raise_for_status()

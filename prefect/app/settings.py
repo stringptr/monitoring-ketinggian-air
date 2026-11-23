@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 DEFAULT_HISTORIC_START_DATE = "2023-01-01"
 DEFAULT_LOCAL_DIR = "/prefect/data"
-DEFAULT_EMPTY_GRACE_DAYS = 3
+DEFAULT_EMPTY_GRACE_DAYS = 5
 DEFAULT_LOOKBACK_DAYS = 7
 
 

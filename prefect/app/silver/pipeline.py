@@ -14,7 +14,6 @@ from functools import reduce
 
 from datalake import date_range, year_chunks
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 from stations import get_stations
 
@@ -110,11 +109,6 @@ def _skeleton(
     )
 
 
-def _max_ingest_date(skeleton: DataFrame) -> str:
-    value = skeleton.agg(F.max("ingest_date")).collect()[0][0]
-    return value or ""
-
-
 def _process_table(
     spark: SparkSession,
     df: DataFrame,
@@ -138,14 +132,14 @@ def _process_table(
         write_table(spark, df, settings, path)
 
     results = check_fn(df, skeleton, settings, identifier, check_freshness)
-    quarantine_result = run_quarantine_check(
+    quarantine_results = run_quarantine_check(
         df,
         quarantine,
         table,
         identifier,
-        _max_ingest_date(skeleton),
+        skeleton,
     )
-    results.append(quarantine_result)
+    results.extend(quarantine_results)
 
     report = build_report(spark, results)
     write_dq_report(spark, report, settings, table)
@@ -153,7 +147,12 @@ def _process_table(
 
     rows = 0 if empty else df.count()
     failed = sum(1 for result in results if not result["passed"])
-    return rows, len(results), failed, int(quarantine_result["failed_count"])
+    return (
+        rows,
+        len(results),
+        failed,
+        sum(result["failed_count"] for result in quarantine_results),
+    )
 
 
 def run_silver(

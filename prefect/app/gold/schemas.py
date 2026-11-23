@@ -159,6 +159,7 @@ PREDICTIONS_SCHEMA = StructType(
         StructField("y_pred", DoubleType()),
         StructField("y_obs", DoubleType()),
         StructField("model_version", StringType()),
+        StructField("dataset_version", StringType()),
         StructField("created_at", TimestampType()),
     ]
 )

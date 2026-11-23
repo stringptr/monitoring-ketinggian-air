@@ -11,11 +11,14 @@ complete one.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from functools import reduce
+from zoneinfo import ZoneInfo
 
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
+from gold.config import TIMEZONE_NAME
 from gold.schemas import FEATURE_COLS, TARGET_COLS
 
 STAGE_LAGS: tuple[int, ...] = (1, 2, 3, 6, 12, 24, 48, 72, 168)
@@ -157,18 +160,26 @@ def add_features(df: DataFrame, horizons: tuple[int, ...]) -> DataFrame:
     return frame.drop(_PRECIP_24, _PRECIP_72)
 
 
-def add_flags(df: DataFrame) -> DataFrame:
+def current_water_year(now: datetime | None = None) -> int:
+    """Return the water year that is still running at ``now``.
+
+    ``is_partial`` must describe the actual current water year, not the last
+    year present in the processed window. Otherwise a historical backfill
+    marks its final year as partial even though that year is complete.
+    """
+
+    moment = now or datetime.now(timezone.utc)
+    local = moment.astimezone(ZoneInfo(TIMEZONE_NAME))
+    return local.year + (1 if local.month >= 10 else 0)
+
+
+def add_flags(df: DataFrame, current_year: int | None = None) -> DataFrame:
     """Add the water-year flag and the trainable-row flag."""
 
-    max_date = df.agg(F.max("date_local")).collect()[0][0]
-    current_year = 0
-    if max_date:
-        year = int(max_date[:4])
-        month = int(max_date[5:7])
-        current_year = year + (1 if month >= 10 else 0)
+    year = current_year if current_year is not None else current_water_year()
 
     return (
-        df.withColumn("is_partial", F.col("water_year") >= F.lit(current_year))
+        df.withColumn("is_partial", F.col("water_year") >= F.lit(year))
         .withColumn(
             "is_trainable",
             ~reduce(
@@ -179,11 +190,15 @@ def add_flags(df: DataFrame) -> DataFrame:
     )
 
 
-def build_features(df: DataFrame, horizons: tuple[int, ...]) -> DataFrame:
+def build_features(
+    df: DataFrame,
+    horizons: tuple[int, ...],
+    current_year: int | None = None,
+) -> DataFrame:
     """Return the feature table with one row per station and hour."""
 
     featured = add_features(df, horizons)
-    flagged = add_flags(featured)
+    flagged = add_flags(featured, current_year=current_year)
     ordered = [column for column in df.columns if column not in FEATURE_COLS]
     return flagged.select(
         *ordered,

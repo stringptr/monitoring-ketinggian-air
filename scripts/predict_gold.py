@@ -2,8 +2,14 @@
 
 The notebook saves ``lightgbm_<station>_h<horizon>.txt`` plus ``metadata.json``
 in ``data/models``. This script loads the latest gold features, applies each
-model, adds ``stage_now`` back (the models predict a delta) and appends the
-result to ``gold/predictions``, which is the table the dashboard reads.
+model, adds ``stage_now`` back (the models predict a delta) and writes
+``gold/predictions``, which is the table the dashboard reads.
+
+Rows with incomplete feature values are skipped: LightGBM accepts nulls, but a
+forecast from a half-empty window is not a forecast the dashboard should show.
+``issued_at`` is the feature timestamp, so ``target_time - issued_at`` is
+exactly the model horizon. Partitions use the hive flavour so ``station_id``
+and ``issue_date`` survive in the path and can be read back by the dashboard.
 
 Run where ``lightgbm`` and the gold tables are reachable, for example inside
 the worker:
@@ -81,7 +87,10 @@ def _write_predictions(frame: pd.DataFrame) -> int:
         filesystem=filesystem,
         format="parquet",
         partitioning=["station_id", "issue_date"],
-        existing_data_behavior="overwrite_or_ignore",
+        # The dashboard reads with the hive flavour, so the keys must be in the
+        # path (station_id=.../issue_date=...), not only in the directory name.
+        partitioning_flavor="hive",
+        existing_data_behavior="delete_matching",
     )
     return len(table)
 
@@ -122,18 +131,35 @@ def main() -> int:
         if part.empty:
             continue
 
+        missing = [column for column in item["features"] if column not in part.columns]
+        if missing:
+            raise SystemExit(
+                f"{station} h+{horizon}: gold is missing features {missing}"
+            )
+
+        # Do not issue a forecast from an incomplete feature row. LightGBM
+        # accepts missing values, but a prediction from a half-empty window is
+        # not a forecast the dashboard should display.
+        part = part.dropna(subset=item["features"])
+        if part.empty:
+            continue
+
         booster = lgb.Booster(model_file=str(model_path))
         prediction = booster.predict(part[item["features"]])
 
         frame = pd.DataFrame(
             {
                 "station_id": station,
-                "issued_at": part["time_utc"].to_numpy() + timedelta(hours=1),
+                # The horizon is measured from the feature timestamp, so this
+                # is the issue time. Adding one hour here silently shortened the
+                # operational lead time by one hour.
+                "issued_at": part["time_utc"].to_numpy(),
                 "target_time": part["time_utc"].to_numpy() + timedelta(hours=horizon),
                 "horizon": horizon,
                 "y_pred": prediction + part["stage_now"].to_numpy(),
                 "y_obs": part[f"y_h{horizon}"].to_numpy(),
                 "model_version": str(item.get("dataset_version", MODEL_VERSION_FALLBACK)),
+                "dataset_version": part["dataset_version"].astype(str).to_numpy(),
                 "created_at": datetime.now(timezone.utc),
             }
         )

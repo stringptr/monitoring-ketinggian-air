@@ -21,6 +21,39 @@ def _empty(df: DataFrame) -> bool:
     return df.limit(1).count() == 0
 
 
+#: Features whose window reaches the full 168-hour lookback. A gap in silver
+#: makes these null and the resulting dataset is not trainable, even though the
+#: hourly grid still looks complete.
+LOOKBACK_FEATURES: tuple[str, ...] = (
+    "stage_lag_168",
+    "stage_mean_168",
+    "stage_max_168",
+    "precip_sum_168",
+)
+
+
+def validate_lookback(df: DataFrame, max_null_ratio: float = 0.20) -> None:
+    """Reject a dataset whose 168-hour lookback is mostly missing.
+
+    The daily chain used to publish a gold table with zero trainable rows when
+    silver had a multi-day gap, and still wrote a ``committed`` marker. This
+    check turns that silent failure into a failed run.
+    """
+
+    total = df.count()
+    if total == 0:
+        raise GoldValidationError("features: no rows produced")
+
+    for column in LOOKBACK_FEATURES:
+        missing = df.filter(F.col(column).isNull()).count()
+        ratio = missing / total
+        if ratio > max_null_ratio:
+            raise GoldValidationError(
+                f"features: {column} is {ratio:.1%} null "
+                f"(limit {max_null_ratio:.0%}); silver lookback is incomplete"
+            )
+
+
 def validate_features(df: DataFrame, table: str) -> None:
     """Validate the feature table before it is published to gold."""
 

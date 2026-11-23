@@ -66,11 +66,35 @@ def _result(
         "station_id": station_id,
         "check_name": check_name,
         "severity": severity,
-        "passed": int(failed_count) == 0,
+        # Informational findings are recorded, not treated as failures.
+        "passed": True if severity == INFO else int(failed_count) == 0,
         "failed_count": int(failed_count),
         "total_count": int(total_count),
         "details": json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
         "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def completeness_failure(
+    expected: int, actual: int, minimum: float
+) -> tuple[int, dict]:
+    """Return ``(failed_count, details)`` for a completeness check.
+
+    A day passes when the share of present samples reaches ``minimum``. Before
+    this, any single missing sample marked the whole day as failed, so the
+    configured 0.90/0.95 thresholds had no effect.
+    """
+
+    if expected <= 0:
+        return 0, {"expected": expected, "actual": actual, "minimum": minimum}
+
+    ratio = actual / expected
+    failed = 0 if ratio >= minimum else max(expected - actual, 1)
+    return failed, {
+        "expected": expected,
+        "actual": actual,
+        "ratio": round(ratio, 4),
+        "minimum": minimum,
     }
 
 
@@ -166,6 +190,9 @@ def run_continuous_checks(
     for row in counts.itertuples(index=False):
         expected = int(row.expected_samples)
         total_rows = int(row.row_count)
+        missing_count, completeness_details = completeness_failure(
+            expected, total_rows, settings.usgs_completeness_min
+        )
         results.extend(
             [
                 _result(
@@ -175,9 +202,9 @@ def run_continuous_checks(
                     row.station_id,
                     "completeness",
                     SOFT,
-                    max(expected - total_rows, 0),
+                    missing_count,
                     expected,
-                    {"expected_samples": expected, "actual_samples": total_rows},
+                    completeness_details,
                 ),
                 _result(
                     run_id,
@@ -300,6 +327,9 @@ def run_usgs_daily_checks(
     for row in counts.itertuples(index=False):
         expected = int(row.expected_daily)
         total_rows = int(row.row_count)
+        missing_count, completeness_details = completeness_failure(
+            expected, total_rows, settings.usgs_completeness_min
+        )
         results.extend(
             [
                 _result(
@@ -309,9 +339,9 @@ def run_usgs_daily_checks(
                     row.station_id,
                     "completeness",
                     SOFT,
-                    max(expected - total_rows, 0),
+                    missing_count,
                     expected,
-                    {"expected_values": expected, "actual_values": total_rows},
+                    completeness_details,
                 ),
                 _result(
                     run_id,
@@ -406,6 +436,9 @@ def run_meteo_checks(
             variable: int(getattr(row, variable)) for variable in METEO_VARIABLES
         }
         missing_total = sum(missing_by_variable.values())
+        missing_count, completeness_details = completeness_failure(
+            expected, total_rows, settings.meteo_completeness_min
+        )
         results.extend(
             [
                 _result(
@@ -415,9 +448,9 @@ def run_meteo_checks(
                     row.station_id,
                     "completeness",
                     SOFT,
-                    max(expected - total_rows, 0),
+                    missing_count,
                     expected,
-                    {"expected_hours": expected, "actual_hours": total_rows},
+                    completeness_details,
                 ),
                 _result(
                     run_id,
@@ -463,20 +496,40 @@ def run_quarantine_check(
     quarantine: DataFrame,
     table: str,
     run_id: str,
-    ingest_date: str,
-) -> dict:
-    total = df.count()
-    quarantined = quarantine.count()
-    return _result(
-        run_id,
-        table,
-        ingest_date,
-        "all",
-        "quarantined_rows",
-        SOFT,
-        quarantined,
-        total + quarantined,
+    skeleton: DataFrame,
+) -> list[dict]:
+    """Report quarantined rows per station and ingest date.
+
+    The summary used to be attached to the last date of the processed range,
+    which made a whole year of problems look like they happened on 31 December.
+    """
+
+    total = df.groupBy("station_id", "ingest_date").count().withColumnRenamed(
+        "count", "kept"
     )
+    quarantined = quarantine.groupBy("station_id", "ingest_date").count()
+    quarantined = quarantined.withColumnRenamed("count", "quarantined")
+
+    counts = (
+        skeleton.select("station_id", "ingest_date")
+        .join(total, ["station_id", "ingest_date"], "left")
+        .join(quarantined, ["station_id", "ingest_date"], "left")
+        .fillna(0)
+    )
+
+    return [
+        _result(
+            run_id,
+            table,
+            row.ingest_date,
+            row.station_id,
+            "quarantined_rows",
+            SOFT,
+            int(row.quarantined),
+            int(row.kept) + int(row.quarantined),
+        )
+        for row in counts.collect()
+    ]
 
 
 def build_report(spark: SparkSession, results: list[dict]) -> DataFrame:

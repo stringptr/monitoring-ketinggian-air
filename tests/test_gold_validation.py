@@ -10,7 +10,11 @@ from pyspark.sql import SparkSession
 
 from common.spark import build_spark_session
 from gold.schemas import FEATURES_SCHEMA
-from gold.validation import GoldValidationError, validate_features
+from gold.validation import (
+    GoldValidationError,
+    validate_features,
+    validate_lookback,
+)
 
 pytestmark = pytest.mark.slow
 
@@ -64,3 +68,32 @@ def test_valid_frame_passes(spark: SparkSession) -> None:
         FEATURES_SCHEMA,
     )
     validate_features(frame, "features")
+
+
+def _complete_lookback(row: dict) -> dict:
+    for column in ("stage_lag_168", "stage_mean_168", "stage_max_168", "precip_sum_168"):
+        row[column] = 1.0
+    return row
+
+
+def test_missing_lookback_is_rejected(spark: SparkSession) -> None:
+    frame = spark.createDataFrame(
+        [
+            _complete_lookback(_row("11525670", "2026-11-16 08:00:00")),
+            _row("11525670", "2026-11-16 09:00:00"),
+        ],
+        FEATURES_SCHEMA,
+    )
+    with pytest.raises(GoldValidationError, match="lookback"):
+        validate_lookback(frame)
+
+
+def test_complete_lookback_passes(spark: SparkSession) -> None:
+    frame = spark.createDataFrame(
+        [
+            _complete_lookback(_row("11525670", "2026-11-16 08:00:00")),
+            _complete_lookback(_row("11525670", "2026-11-16 09:00:00")),
+        ],
+        FEATURES_SCHEMA,
+    )
+    validate_lookback(frame)
