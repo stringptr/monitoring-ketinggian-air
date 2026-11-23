@@ -31,16 +31,48 @@ EXPECTED_USGS_SAMPLES_PER_DAY = 96
 EXPECTED_METEO_HOURS_PER_DAY = 24
 EXPECTED_USGS_DAILY_VALUES = 1
 
-TABLE_USGS_CONTINUOUS = "usgs_continuous_00065"
+TABLE_USGS_CONTINUOUS_00065 = "usgs_continuous_00065"
+TABLE_USGS_CONTINUOUS_00060 = "usgs_continuous_00060"
 TABLE_USGS_DAILY = "usgs_daily_00060"
 TABLE_METEO_HOURLY = "open_meteo_hourly"
 
-PATH_USGS_CONTINUOUS = "usgs/continuous/parameter_code=00065"
+PATH_USGS_CONTINUOUS_00065 = "usgs/continuous/parameter_code=00065"
+PATH_USGS_CONTINUOUS_00060 = "usgs/continuous/parameter_code=00060"
 PATH_USGS_DAILY = "usgs/daily/parameter_code=00060"
 PATH_METEO_HOURLY = "open-meteo"
 
+#: Kept as aliases for the gage-height table.
+TABLE_USGS_CONTINUOUS = TABLE_USGS_CONTINUOUS_00065
+PATH_USGS_CONTINUOUS = PATH_USGS_CONTINUOUS_00065
+
 TABLE_DQ = "_dq"
 TABLE_QUARANTINE = "_quarantine"
+
+
+@dataclass(frozen=True)
+class ContinuousSpec:
+    """One USGS continuous parameter and the table it produces."""
+
+    parameter_code: str
+    table: str
+    path: str
+    expected_unit: str
+
+
+CONTINUOUS_SPECS: tuple[ContinuousSpec, ...] = (
+    ContinuousSpec(
+        parameter_code="00065",
+        table=TABLE_USGS_CONTINUOUS_00065,
+        path=PATH_USGS_CONTINUOUS_00065,
+        expected_unit="ft",
+    ),
+    ContinuousSpec(
+        parameter_code="00060",
+        table=TABLE_USGS_CONTINUOUS_00060,
+        path=PATH_USGS_CONTINUOUS_00060,
+        expected_unit="ft^3/s",
+    ),
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:

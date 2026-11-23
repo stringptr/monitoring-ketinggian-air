@@ -190,7 +190,13 @@ def run_gold(
         hourly_window = _window_filter(hourly, start_date, end_date)
         features_window = _window_filter(features, start_date, end_date)
 
-        version = dataset_version()
+        effective_discharge_source = (
+            "hourly"
+            if settings.discharge_source == "hourly"
+            or (settings.discharge_source == "auto" and discharge_hourly is not None)
+            else "daily"
+        )
+        version = dataset_version(effective_discharge_source)
         hourly_window = hourly_window.withColumn("dataset_version", F.lit(version))
         features_window = features_window.withColumn("dataset_version", F.lit(version))
 

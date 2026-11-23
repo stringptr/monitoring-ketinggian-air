@@ -18,6 +18,7 @@ Spark, lalu disajikan melalui dashboard Streamlit.
 
 ```
 silver/usgs/continuous/parameter_code=00065/station_id=<site>/ingest_date=YYYY-MM-DD/part-000.parquet
+silver/usgs/continuous/parameter_code=00060/station_id=<site>/ingest_date=YYYY-MM-DD/part-000.parquet
 silver/usgs/daily/parameter_code=00060/station_id=<site>/ingest_date=YYYY-MM-DD/part-000.parquet
 silver/open-meteo/station_id=<site>/ingest_date=YYYY-MM-DD/part-000.parquet
 silver/_dq/table=<table>/ingest_date=YYYY-MM-DD/
@@ -37,9 +38,10 @@ dikarantina. Nilai meteo di luar range di-null-kan dan dicatat di quarantine.
 
 ## Bronze Layer
 
-lows/pipeline.py menarik JSON mentah USGS (00065 continuous, 00060 daily)
-dan Open-Meteo hourly, satu partisi per hari UTC di `bronze/`. Partisi yang
-sudah ada dilewati, sehingga backfill dapat dihentikan dan dilanjutkan.
+flows/pipeline.py menarik JSON mentah USGS (00065 dan 00060 continuous,
+ditambah 00060 daily sebagai pembanding) dan Open-Meteo hourly, satu partisi
+per hari UTC di `bronze/`. Partisi yang sudah ada dilewati, sehingga backfill
+dapat dihentikan dan dilanjutkan.
 
 ## Gold Layer
 

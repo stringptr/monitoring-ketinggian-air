@@ -162,8 +162,11 @@ def run_continuous_checks(
     settings: SilverSettings,
     run_id: str,
     check_freshness: bool,
+    *,
+    table: str = TABLE_USGS_CONTINUOUS,
+    expected_unit: str = "ft",
 ) -> list[dict]:
-    """Checks for 15-minute USGS gage-height samples."""
+    """Checks for one 15-minute USGS continuous parameter."""
 
     results: list[dict] = []
     counts = _collect_counts(
@@ -179,7 +182,7 @@ def run_continuous_checks(
             ).alias("provisional_values"),
             F.sum(
                 F.when(
-                    F.col("unit").isNotNull() & (F.col("unit") != "ft"),
+                    F.col("unit").isNotNull() & (F.col("unit") != expected_unit),
                     1,
                 ).otherwise(0)
             ).alias("wrong_unit"),
@@ -197,7 +200,7 @@ def run_continuous_checks(
             [
                 _result(
                     run_id,
-                    TABLE_USGS_CONTINUOUS,
+                    table,
                     row.ingest_date,
                     row.station_id,
                     "completeness",
@@ -208,7 +211,7 @@ def run_continuous_checks(
                 ),
                 _result(
                     run_id,
-                    TABLE_USGS_CONTINUOUS,
+                    table,
                     row.ingest_date,
                     row.station_id,
                     "missing_values",
@@ -218,7 +221,7 @@ def run_continuous_checks(
                 ),
                 _result(
                     run_id,
-                    TABLE_USGS_CONTINUOUS,
+                    table,
                     row.ingest_date,
                     row.station_id,
                     "negative_values",
@@ -228,7 +231,7 @@ def run_continuous_checks(
                 ),
                 _result(
                     run_id,
-                    TABLE_USGS_CONTINUOUS,
+                    table,
                     row.ingest_date,
                     row.station_id,
                     "provisional_values",
@@ -238,14 +241,14 @@ def run_continuous_checks(
                 ),
                 _result(
                     run_id,
-                    TABLE_USGS_CONTINUOUS,
+                    table,
                     row.ingest_date,
                     row.station_id,
                     "unit_consistency",
                     SOFT,
                     int(row.wrong_unit),
                     total_rows,
-                    {"expected": "ft"},
+                    {"expected": expected_unit},
                 ),
             ]
         )
@@ -267,7 +270,7 @@ def run_continuous_checks(
         results.append(
             _result(
                 run_id,
-                TABLE_USGS_CONTINUOUS,
+                table,
                 row.ingest_date,
                 row.station_id,
                 "max_gap",
@@ -283,7 +286,7 @@ def run_continuous_checks(
         results.append(
             _freshness_result(
                 run_id,
-                TABLE_USGS_CONTINUOUS,
+                table,
                 _max_ingest_date(skeleton),
                 newest,
                 settings,

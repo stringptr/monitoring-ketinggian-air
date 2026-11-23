@@ -45,6 +45,11 @@ def test_dataset_version_describes_the_definition() -> None:
     assert definition["stage_complete_min_samples"] == STAGE_COMPLETE_MIN_SAMPLES
 
 
+def test_dataset_version_depends_on_discharge_source() -> None:
+    assert version.dataset_version("hourly") != version.dataset_version("daily")
+    assert version.definition("hourly")["discharge_source"] == "hourly"
+
+
 def test_window_includes_feature_history_and_target_horizon() -> None:
     settings = GoldSettings(
         historic_start_date="2024-01-01",
