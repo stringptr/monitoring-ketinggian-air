@@ -2,3 +2,4 @@ streamlit>=1.38,<2
 pandas>=2.2,<3
 pyarrow>=16,<22
 plotly>=5.22,<6
+deltalake>=1.7

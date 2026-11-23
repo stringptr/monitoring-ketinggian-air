@@ -46,9 +46,6 @@ from gold.schemas import (
 from gold.validation import validate_features, validate_lookback
 from gold.version import dataset_version
 from gold.writer import (
-    cleanup_staging,
-    publish_table,
-    staging_root,
     write_dataset_version,
     write_dq_report,
     write_table,
@@ -211,14 +208,14 @@ def run_gold(
             settings,
         )
 
-        staging = staging_root(settings, identifier)
+        predicate = f"date_utc >= '{start_date}' AND date_utc <= '{end_date}'"
         write_table(
             spark,
             hourly_window,
             settings,
             TABLE_STATION_HOURLY,
             partition_cols=("station_id", "date_utc"),
-            base=staging,
+            predicate=predicate,
         )
         write_table(
             spark,
@@ -226,17 +223,7 @@ def run_gold(
             settings,
             TABLE_FEATURES,
             partition_cols=("station_id", "date_utc"),
-            base=staging,
-        )
-
-        published_hourly = publish_table(
-            settings, TABLE_STATION_HOURLY, identifier
-        )
-        published_features = publish_table(settings, TABLE_FEATURES, identifier)
-        cleanup_staging(settings, identifier)
-        print(
-            f"gold: published {published_hourly} hourly and "
-            f"{published_features} feature file(s)"
+            predicate=predicate,
         )
 
         write_dq_report(spark, dq, settings, TABLE_FEATURES)

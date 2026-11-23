@@ -4,7 +4,7 @@ The main panel is the prediction chart: observed gage height against the
 prediction the model issued for each target hour. The remaining panels are
 supporting context (current level, recent error, hydrograph with rainfall).
 
-Everything is read from the gold bucket; the dashboard never recomputes
+Everything is read from the gold Delta tables; the dashboard never recomputes
 features and never calls the model directly.
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -25,28 +24,26 @@ DEFAULT_WINDOW_DAYS = 30
 
 
 @st.cache_resource(show_spinner=False)
-def _filesystem():
-    """Return the filesystem, the table root and whether it is object storage."""
-
-    import pyarrow.fs as pafs
+def _storage() -> tuple[dict[str, str] | None, str]:
+    """Return delta-rs storage options and the gold Delta root."""
 
     endpoint = os.getenv("S3_ENDPOINT_URL", "").strip()
     if not endpoint:
-        return (
-            pafs.LocalFileSystem(),
-            os.getenv("GOLD_LOCAL_DIR", "/prefect/data/gold"),
-            False,
-        )
+        return None, os.getenv("GOLD_LOCAL_DIR", "/prefect/data/gold").rstrip(
+            "/"
+        ) + "/delta"
 
-    parsed = urlparse(endpoint)
-    filesystem = pafs.S3FileSystem(
-        access_key=os.getenv("GARAGE_DEFAULT_ACCESS_KEY", ""),
-        secret_key=os.getenv("GARAGE_DEFAULT_SECRET_KEY", ""),
-        endpoint_override=parsed.netloc,
-        scheme=parsed.scheme or "http",
-        region=os.getenv("S3_REGION", "garage"),
+    return (
+        {
+            "AWS_ENDPOINT_URL": endpoint.rstrip("/"),
+            "AWS_ACCESS_KEY_ID": os.getenv("GARAGE_DEFAULT_ACCESS_KEY", ""),
+            "AWS_SECRET_ACCESS_KEY": os.getenv("GARAGE_DEFAULT_SECRET_KEY", ""),
+            "AWS_REGION": os.getenv("S3_REGION", "garage"),
+            "AWS_S3_ALLOW_UNSAFE_RENAME": "true",
+            "AWS_ALLOW_HTTP": "true",
+        },
+        f"s3://{os.getenv('S3_BUCKET_GOLD', 'gold')}/delta",
     )
-    return filesystem, os.getenv("S3_BUCKET_GOLD", "gold"), True
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
@@ -56,27 +53,20 @@ def _read_table(
     since: str | None = None,
     columns: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
-    """Read a gold table with filter pushdown, empty when it does not exist."""
+    """Read a gold Delta table, empty when it does not exist."""
 
-    import pyarrow.dataset as ds
-    import pyarrow.fs as pafs
+    from deltalake import DeltaTable
 
-    filesystem, base, _ = _filesystem()
-    path = f"{base}/{name}"
-
+    options, base = _storage()
     try:
-        info = filesystem.get_file_info(path)
-        if info.type == pafs.FileType.NotFound:
-            return pd.DataFrame()
-        dataset = ds.dataset(
-            path, filesystem=filesystem, format="parquet", partitioning="hive"
+        table = DeltaTable(f"{base}/{name}", storage_options=options or {})
+        filters = (
+            [(since_column, ">=", since)] if since_column and since else None
         )
-        expression = None
-        if since_column and since:
-            expression = ds.field(since_column) >= since
-        frame = dataset.to_table(
-            filter=expression, columns=list(columns) if columns else None
-        ).to_pandas()
+        frame = table.to_pandas(
+            columns=list(columns) if columns else None,
+            filters=filters,
+        )
     except Exception:  # noqa: BLE001 - the dashboard must stay alive
         return pd.DataFrame()
 

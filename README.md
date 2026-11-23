@@ -45,13 +45,14 @@ dapat dihentikan dan dilanjutkan.
 
 ## Gold Layer
 
-gold/ menyatukan silver menjadi satu baris per jam per stasiun, lalu
+gold/delta/ menyatukan silver menjadi satu baris per jam per stasiun sebagai
+tabel Delta, lalu
 menurunkan fitur model dan mencatat kualitas data. Detail skema, keputusan,
 dan batasan ada di [GOLD.md](GOLD.md).
 
-- gold/station_hourly: dataset per jam untuk dashboard.
-- gold/features: 48 fitur + target y_h1, y_h6, y_h24.
-- gold/predictions, gold/model_metrics: diisi oleh proses inference dan
+- gold/delta/station_hourly: dataset per jam untuk dashboard.
+- gold/delta/features: 48 fitur + target y_h1, y_h6, y_h24.
+- gold/delta/predictions, gold/delta/model_metrics: diisi oleh proses inference dan
   pelatihan model.
 - gold/_dq: laporan kualitas data per tanggal.
 

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from pathlib import Path
 
 import pandas as pd
 
+from gold.delta import read_delta
 from gold.schemas import FEATURE_COLS, TARGET_COLS
 from training.config import TrainingSettings
 
@@ -30,36 +30,10 @@ def selected_columns() -> list[str]:
     )
 
 
-def _dataset(settings: TrainingSettings):
-    import pyarrow.dataset as ds
-    import pyarrow.fs as pafs
-    from urllib.parse import urlparse
-
-    endpoint = (settings.s3_endpoint_url or "").strip()
-    if not endpoint:
-        path = str(Path(settings.local_output_dir) / "gold" / "features")
-        filesystem = pafs.LocalFileSystem()
-    else:
-        parsed = urlparse(endpoint)
-        filesystem = pafs.S3FileSystem(
-            access_key=settings.access_key,
-            secret_key=settings.secret_key,
-            endpoint_override=parsed.netloc,
-            scheme=parsed.scheme or "http",
-            region=settings.s3_region,
-        )
-        path = f"{settings.s3_bucket_gold}/features"
-
-    if filesystem.get_file_info(path).type == pafs.FileType.NotFound:
-        raise FileNotFoundError(f"{path} not found; run gold-backfill first")
-
-    return ds.dataset(path, filesystem=filesystem, format="parquet", partitioning="hive")
-
-
 def read_features(settings: TrainingSettings) -> pd.DataFrame:
-    """Read the gold feature table as a pandas frame."""
+    """Read the gold Delta feature table as a pandas frame."""
 
-    frame = _dataset(settings).to_table(columns=selected_columns()).to_pandas()
+    frame = read_delta(settings, "features", columns=selected_columns())
     frame["time_utc"] = pd.to_datetime(frame["time_utc"], utc=True)
     frame["station_id"] = frame["station_id"].astype(str)
     return frame

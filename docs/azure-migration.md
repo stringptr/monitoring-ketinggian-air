@@ -11,7 +11,8 @@ lapisan penyimpanan.
 | Garage S3 | ADLS Gen2 | Ganti `S3_ENDPOINT_URL`, bucket, dan kredensial dengan akun storage serta managed identity |
 | Prefect worker | Azure Container Apps Job atau Data Factory | Prefect tetap bisa dipakai, tetapi ADF lebih lazim untuk jadwal dan dependensi |
 | Spark `local[2]` | Synapse Spark pool atau Databricks | Naikkan core dan shuffle partition |
-| Parquet silver/gold | Delta Lake di ADLS | Publish atomik, `MERGE`, time travel, dan `OPTIMIZE` |
+| Delta gold lokal | Delta Lake di ADLS | Gold sudah Delta lewat `delta-rs`; di Azure gunakan Spark Delta untuk `MERGE` dan `OPTIMIZE` |
+| Parquet silver | Delta Lake di ADLS | Silver masih Parquet; migrasi berikutnya |
 | MLflow lokal | Azure ML managed MLflow atau MLflow di AKS | `MLFLOW_TRACKING_URI` diarahkan ke server terkelola |
 | Dashboard Streamlit | Container Apps, lalu React + API | API membaca gold, frontend hanya JSON |
 | `.env` | Key Vault dan managed identity | Jangan menyimpan kredensial di image atau repo |
@@ -28,8 +29,10 @@ lapisan penyimpanan.
 
 ## Perubahan yang disarankan saat migrasi
 
-1. **Delta Lake untuk gold lebih dulu.** Ini memperbaiki publish atomik dan
-   memberi versi tabel untuk lineage MLflow.
+1. **Delta Lake untuk gold sudah diterapkan di lokal dengan `delta-rs`.**
+   Di Azure, ganti writer ke Spark Delta di atas ADLS agar `MERGE`,
+   `replaceWhere`, dan `OPTIMIZE` berjalan di cluster. Ini juga memberi versi
+   tabel untuk lineage MLflow.
 2. **Partisi bulanan untuk silver.** Layout harian menghasilkan puluhan ribu
    file kecil dan membuat backfill lambat. Partisi bulanan memotong jumlah file
    sekitar 30 kali.
@@ -45,6 +48,11 @@ Backfill silver 2015-2026 dihentikan setelah 2020 karena lambat. Penyebabnya
 bukan volume data (sekitar 237 ribu baris per tahun), melainkan ribuan file
 kecil, penulisan ulang partisi dinamis di S3A, dan pekerjaan yang diulang tanpa
 cache. Ini menjadi dasar pemilihan Delta dan partisi bulanan di Azure.
+
+Delta gold sudah diuji di Garage. Spark Delta gagal karena S3A menerima HTTP
+400 saat membaca `_last_checkpoint`. `delta-rs` berhasil menulis, overwrite
+dengan predicate, dan time travel. Di ADLS, Spark Delta dapat dipakai tanpa
+batasan itu.
 
 ## Yang belum
 
