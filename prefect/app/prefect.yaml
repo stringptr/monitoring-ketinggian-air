@@ -92,3 +92,18 @@ deployments:
     concurrency_limit: 1
     work_pool:
       name: local-pool
+
+  - name: train-models
+    description: >-
+      Train 3 stations x 3 horizons from gold/features, evaluate against
+      persistence and apply the promotion gate. The schedule is inactive until
+      the historical gold backfill is complete and the first run is validated.
+    entrypoint: flows/training_flow.py:training_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: weekly-0400-utc
+        cron: "0 4 * * 1"
+        timezone: UTC
+        active: false

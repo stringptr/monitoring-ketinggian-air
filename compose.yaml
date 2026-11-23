@@ -111,6 +111,7 @@ services:
       PREFECT_API_URL: http://prefect-server:4200/api
       PREFECT_WORKING_DIR: /prefect
       PYTHONPATH: /prefect
+      MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
     env_file: .env
     volumes:
       - ./prefect/app:/prefect:z
@@ -140,3 +141,19 @@ services:
     env_file: .env
     volumes:
       - ./dashboard:/app:z
+
+  mlflow:
+    build:
+      context: ./config/mlflow
+    restart: unless-stopped
+    ports:
+      - "${HOST_IP:-127.0.0.1}:${MLFLOW_HOST_PORT:-5050}:5000"
+    volumes:
+      - ./mlflow:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+      --allowed-hosts "mlflow:5000,localhost:5050,127.0.0.1:5050"
