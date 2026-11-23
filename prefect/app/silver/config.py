@@ -17,7 +17,9 @@ from pathlib import Path
 TIMEZONE_NAME = "America/Los_Angeles"
 
 DEFAULT_HISTORIC_START_DATE = "2015-10-01"
-DEFAULT_LOOKBACK_DAYS = 7
+#: Silver must cover the gold window plus gold's 168-hour feature lookback.
+#: The daily gold window is 7 days, so silver reprocesses 14 days.
+DEFAULT_LOOKBACK_DAYS = 14
 DEFAULT_USGS_COMPLETENESS_MIN = 0.90
 DEFAULT_METEO_COMPLETENESS_MIN = 0.95
 DEFAULT_MAX_GAP_HOURS = 3

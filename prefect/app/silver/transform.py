@@ -202,7 +202,17 @@ def clean_meteo(spark: SparkSession, df: DataFrame) -> tuple[DataFrame, DataFram
 
     quarantine = reduce(DataFrame.unionByName, violations)
 
-    clean = valid_timestamp.select(
+    dedupe_window = Window.partitionBy("station_id", "time_utc").orderBy(
+        F.col("ingest_date").desc_nulls_last(),
+        F.col("time_raw").desc_nulls_last(),
+    )
+    latest = (
+        valid_timestamp.withColumn("_row_number", F.row_number().over(dedupe_window))
+        .filter(F.col("_row_number") == 1)
+        .drop("_row_number")
+    )
+
+    clean = latest.select(
         "station_id",
         "ingest_date",
         "time_utc",
@@ -214,7 +224,7 @@ def clean_meteo(spark: SparkSession, df: DataFrame) -> tuple[DataFrame, DataFram
         "longitude",
         "elevation",
         "timezone",
-    ).dropDuplicates(["station_id", "time_utc"])
+    )
 
     return clean, quarantine
 

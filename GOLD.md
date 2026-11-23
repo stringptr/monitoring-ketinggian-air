@@ -116,9 +116,29 @@ jendela tidak mewakili satu tanggal. Setiap baris punya `scope` (`date` atau
 - `hour_sin`, `hour_cos`, `doy_sin`, `doy_cos`
 
 Target: `y_h1`, `y_h6`, `y_h24` (ketinggian air `horizon` jam ke depan),
-ditambah `is_partial` (water year berjalan) dan `is_trainable` (seluruh fitur
-dan target terisi). Model tetap dilatih pada **selisih** `y_h - stage_now`,
-sama seperti notebook.
+ditambah `is_partial` (water year berjalan, dihitung dari tanggal hari ini di
+zona `America/Los_Angeles`, bukan dari ujung jendela) dan `is_trainable`
+(seluruh fitur dan target terisi). Model tetap dilatih pada **selisih**
+`y_h - stage_now`, sama seperti notebook.
+
+## Kolom `predictions`
+
+| Kolom | Isi |
+|---|---|
+| `station_id` | Stasiun, bagian dari partisi hive |
+| `issued_at` | Waktu fitur `time_utc`; horizon dihitung dari waktu ini |
+| `target_time` | `issued_at + horizon` |
+| `horizon` | 1, 6, atau 24 jam |
+| `y_pred` | Level air hasil prediksi, sudah ditambah `stage_now` |
+| `y_obs` | Observasi pada `target_time`, bila tersedia |
+| `model_version` | Versi model dari metadata notebook |
+| `dataset_version` | Versi definisi gold yang dipakai saat inferensi |
+| `created_at` | Waktu skrip inferensi menulis baris |
+
+Hanya baris dengan seluruh 48 fitur terisi yang diprediksi. Baris tanpa debit
+harian, misalnya jam setelah sumber harian berakhir, dilewati daripada
+dipaksakan. Partisi memakai hive (`station_id=.../issue_date=...`) agar dapat
+dibaca dashboard dengan `partitioning="hive"`.
 
 Jendela bergulir memakai `min_periods` 90 persen, sama dengan notebook. Ini
 penting karena fungsi agregat Spark mengabaikan nilai kosong; tanpa penjaga

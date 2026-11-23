@@ -43,7 +43,7 @@ from gold.schemas import (
     FEATURE_COLS,
     METEO_COLUMNS,
 )
-from gold.validation import validate_features
+from gold.validation import validate_features, validate_lookback
 from gold.version import dataset_version
 from gold.writer import (
     cleanup_staging,
@@ -195,6 +195,7 @@ def run_gold(
         features_window = features_window.withColumn("dataset_version", F.lit(version))
 
         # Validate before publishing: a hard failure here leaves storage untouched.
+        validate_lookback(features_window)
         validate_features(features_window, TABLE_FEATURES)
         dq = run_checks(
             spark,
