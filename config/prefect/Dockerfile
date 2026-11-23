@@ -20,6 +20,8 @@ RUN uv pip install --no-cache \
     "pandera>=0.26,<0.37" \
     "pytest>=8" \
     "lightgbm>=4.5" \
+    "scikit-learn>=1.5" \
+    "mlflow>=2.20" \
     "tzdata"
 
 ARG HADOOP_AWS_VERSION=3.4.1
