@@ -8,6 +8,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from silver.config import TABLE_DQ, TABLE_QUARANTINE, SilverSettings, local_uri
+from silver.delta import write_delta
 
 
 def silver_root(settings: SilverSettings) -> str:
@@ -30,20 +31,25 @@ def write_table(
     settings: SilverSettings,
     table_path_name: str,
     partition_cols: tuple[str, ...] = ("station_id", "ingest_date"),
+    predicate: str | None = None,
 ) -> str | None:
-    """Overwrite only the station/ingest_date partitions present in ``df``."""
+    """Write the chunk to a silver Delta table, replacing matching rows."""
 
     if _is_empty(df):
         return None
 
-    path = table_path(settings, table_path_name)
-    (
-        df.repartition(*partition_cols)
-        .write.mode("overwrite")
-        .partitionBy(*partition_cols)
-        .parquet(path)
+    frame = df.toPandas()
+    if frame.empty:
+        return None
+
+    return write_delta(
+        frame,
+        settings,
+        table_path_name,
+        mode="overwrite",
+        predicate=predicate,
+        partition_by=list(partition_cols),
     )
-    return path
 
 
 def _valid_ingest_date(column: str = "ingest_date") -> F.Column:

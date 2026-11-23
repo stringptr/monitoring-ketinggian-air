@@ -61,7 +61,7 @@ membaca jalur `gold/delta`.
 
 - `AWS_S3_ALLOW_UNSAFE_RENAME` hanya aman untuk penulis tunggal. Jangan jalankan
   dua penulis gold bersamaan di lokal.
-- Silver masih Parquet. Delta silver menyusul.
+- Silver sekarang Delta. Lihat `docs/progress-delta-silver.md`.
 - `model_metrics` ditulis sebagai snapshot, bukan riwayat. Riwayat run ada di
   MLflow.
 - Tabel Parquet lama tidak dihapus.

@@ -32,8 +32,9 @@ silver -> gold/delta/station_hourly -> dashboard
 Satu run berjalan dengan urutan tetap, dan **tidak ada yang ditulis sebelum
 validasi lolos**:
 
-1. Baca silver untuk jendela yang diminta (dipotong ke hari terakhir yang
-   benar-benar punya data).
+1. Baca silver Delta untuk jendela yang diminta (dipotong ke hari terakhir
+   yang benar-benar punya data). Pembacaan memakai `delta-rs` karena Spark
+   Delta tidak bisa membaca Garage, lalu dikonversi ke Spark.
 2. Bentuk grid per jam, lalu tabel `station_hourly`.
 3. Bentuk `features` beserta target.
 4. Validasi keras: kolom lengkap, tidak kosong, tidak ada duplikat
