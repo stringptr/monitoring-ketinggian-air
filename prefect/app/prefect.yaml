@@ -10,27 +10,14 @@ pull:
       directory: /prefect
 
 deployments:
-  - name: bronze-ingest
+  # Only daily-all is scheduled. It chains bronze, silver and gold in one run so
+  # gold never reads silver that is still being written.
+  - name: daily-all
     description: >-
-      Ingest raw USGS hydrology and Open-Meteo meteorology JSON into the bronze
-      bucket for the three California monitoring stations, one partition per UTC
-      day. Missing days are backfilled idempotently; existing days are skipped.
-    entrypoint: flows/pipeline.py:bronze_pipeline
-    concurrency_limit: 1
-    work_pool:
-      name: local-pool
-    schedules:
-      - slug: daily-0200-utc
-        cron: "0 2 * * *"
-        timezone: UTC
-        active: true
-
-  - name: daily-bronze-silver
-    description: >-
-      Run the existing bronze ingestion and then the native-resolution silver
-      transform. Deactivate the bronze-ingest deployment above after enabling
-      this one so each day is only ingested once.
-    entrypoint: flows/daily_pipeline.py:daily_pipeline
+      One daily run: bronze ingestion, native-resolution silver transform, then
+      the hourly gold dataset. Each step starts only after the previous one
+      completes, so the layers no longer depend on cron times to stay in order.
+    entrypoint: flows/daily_all.py:daily_all
     concurrency_limit: 1
     work_pool:
       name: local-pool
@@ -40,12 +27,66 @@ deployments:
         timezone: UTC
         active: true
 
+  - name: bronze-ingest
+    description: >-
+      Manual or legacy bronze-only ingestion. Kept for reruns; its schedule is
+      disabled because daily-all already runs bronze once per day.
+    entrypoint: flows/pipeline.py:bronze_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0200-utc
+        cron: "0 2 * * *"
+        timezone: UTC
+        active: false
+
+  - name: daily-bronze-silver
+    description: >-
+      Legacy bronze+silver run kept for reruns. Its schedule is disabled in
+      favour of daily-all, which adds gold to the same chain.
+    entrypoint: flows/daily_pipeline.py:daily_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0230-utc
+        cron: "30 2 * * *"
+        timezone: UTC
+        active: false
+
   - name: silver-backfill
     description: >-
       Manual one-off backfill of the native-resolution silver tables from the
       historic start date through the last complete UTC ingest day. The range
       is processed in calendar-year chunks.
     entrypoint: flows/silver_flow.py:silver_pipeline
+    parameters:
+      backfill: true
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+
+  - name: daily-gold
+    description: >-
+      Manual gold-only run for the rolling window. Scheduled runs go through
+      daily-all so gold cannot start before silver finishes.
+    entrypoint: flows/gold_flow.py:gold_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: local-pool
+    schedules:
+      - slug: daily-0300-utc
+        cron: "0 3 * * *"
+        timezone: UTC
+        active: false
+
+  - name: gold-backfill
+    description: >-
+      Manual one-off rebuild of the gold tables from the historic start date
+      through the last complete UTC day. Gold is fully rebuildable from silver,
+      so this can be run whenever the feature definitions change.
+    entrypoint: flows/gold_flow.py:gold_pipeline
     parameters:
       backfill: true
     concurrency_limit: 1
