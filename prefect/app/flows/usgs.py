@@ -42,8 +42,9 @@ CONTINUOUS_ITEMS = f"{API_BASE}/continuous/items"
 
 #: USGS parameter codes and the collection each one is fetched from.
 USGS_PARAMETERS: tuple[tuple[str, str, str], ...] = (
-    ("daily", "00060", DAILY_ITEMS),  # discharge, daily values
-    ("continuous", "00065", CONTINUOUS_ITEMS),  # gage height, continuous values
+    ("continuous", "00065", CONTINUOUS_ITEMS),  # gage height, 15 minutes
+    ("continuous", "00060", CONTINUOUS_ITEMS),  # discharge, 15 minutes
+    ("daily", "00060", DAILY_ITEMS),  # discharge, daily mean for comparison
 )
 
 #: Page size used while walking the paginated response.

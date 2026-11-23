@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import suppress
-from functools import reduce
+from functools import partial, reduce
 
 from datalake import date_range, year_chunks
 from pyspark.sql import DataFrame, SparkSession
@@ -19,14 +19,13 @@ from stations import get_stations
 
 from silver import readers
 from silver.config import (
+    CONTINUOUS_SPECS,
     EXPECTED_METEO_HOURS_PER_DAY,
     EXPECTED_USGS_DAILY_VALUES,
     EXPECTED_USGS_SAMPLES_PER_DAY,
     PATH_METEO_HOURLY,
-    PATH_USGS_CONTINUOUS,
     PATH_USGS_DAILY,
     TABLE_METEO_HOURLY,
-    TABLE_USGS_CONTINUOUS,
     TABLE_USGS_DAILY,
     SilverSettings,
 )
@@ -173,11 +172,15 @@ def run_silver(
         identifier = run_id()
         stations = get_stations()
 
-        availability: dict[tuple[str, str], set[str]] = {}
+        availability: dict[tuple[str, ...], set[str]] = {}
         for station in stations:
-            availability[(station.site_no, "continuous")] = readers.available_dates(
-                settings, readers.continuous_prefix(station)
-            )
+            for spec in CONTINUOUS_SPECS:
+                availability[(station.site_no, "continuous", spec.parameter_code)] = (
+                    readers.available_dates(
+                        settings,
+                        readers.continuous_prefix(station, spec.parameter_code),
+                    )
+                )
             availability[(station.site_no, "daily")] = readers.available_dates(
                 settings, readers.daily_prefix(station)
             )
@@ -185,11 +188,9 @@ def run_silver(
                 settings, readers.meteo_prefix(station)
             )
 
-        totals = {
-            TABLE_USGS_CONTINUOUS: 0,
-            TABLE_USGS_DAILY: 0,
-            TABLE_METEO_HOURLY: 0,
-        }
+        totals = {spec.table: 0 for spec in CONTINUOUS_SPECS}
+        totals[TABLE_USGS_DAILY] = 0
+        totals[TABLE_METEO_HOURLY] = 0
         dq = {table: {"checks": 0, "failed": 0} for table in totals}
         quarantine_totals = {table: 0 for table in totals}
 
@@ -197,25 +198,39 @@ def run_silver(
             chunk_dates = list(date_range(chunk_start, chunk_end))
             skeleton = _skeleton(spark, stations, chunk_dates)
 
-            continuous_frames: list[DataFrame] = []
+            continuous_frames: dict[str, list[DataFrame]] = {
+                spec.table: [] for spec in CONTINUOUS_SPECS
+            }
+            continuous_quarantine: dict[str, list[DataFrame]] = {
+                spec.table: [] for spec in CONTINUOUS_SPECS
+            }
             daily_frames: list[DataFrame] = []
             meteo_frames: list[DataFrame] = []
-            continuous_quarantine: list[DataFrame] = []
             daily_quarantine: list[DataFrame] = []
             meteo_quarantine: list[DataFrame] = []
 
             for station in stations:
                 site_no = station.site_no
+                continuous_counts: dict[str, int] = {}
 
-                continuous_days = sorted(
-                    set(chunk_dates) & availability[(site_no, "continuous")]
-                )
-                raw = readers.read_usgs_continuous(
-                    spark, settings, station, continuous_days
-                )
-                valid, quarantined = clean_continuous(spark, raw)
-                continuous_frames.append(valid)
-                continuous_quarantine.append(quarantined)
+                for spec in CONTINUOUS_SPECS:
+                    continuous_days = sorted(
+                        set(chunk_dates)
+                        & availability[
+                            (site_no, "continuous", spec.parameter_code)
+                        ]
+                    )
+                    raw = readers.read_usgs_continuous(
+                        spark,
+                        settings,
+                        station,
+                        continuous_days,
+                        spec.parameter_code,
+                    )
+                    valid, quarantined = clean_continuous(spark, raw)
+                    continuous_frames[spec.table].append(valid)
+                    continuous_quarantine[spec.table].append(quarantined)
+                    continuous_counts[spec.parameter_code] = len(continuous_days)
 
                 daily_days = sorted(set(chunk_dates) & availability[(site_no, "daily")])
                 raw = readers.read_usgs_daily(spark, settings, station, daily_days)
@@ -229,39 +244,52 @@ def run_silver(
                 meteo_frames.append(valid)
                 meteo_quarantine.append(quarantined)
 
+                continuous_label = " ".join(
+                    f"continuous_{code}={count}"
+                    for code, count in continuous_counts.items()
+                )
                 print(
-                    f"silver {site_no}: continuous={len(continuous_days)} "
+                    f"silver {site_no}: {continuous_label} "
                     f"daily={len(daily_days)} meteo={len(meteo_days)} "
                     f"({chunk_start}..{chunk_end})"
                 )
 
-            continuous = _union(continuous_frames, USGS_CONTINUOUS_SCHEMA, spark)
+            for spec in CONTINUOUS_SPECS:
+                continuous = _union(
+                    continuous_frames[spec.table], USGS_CONTINUOUS_SCHEMA, spark
+                )
+                continuous_q = _union(
+                    continuous_quarantine[spec.table],
+                    QUARANTINE_CONTINUOUS_SCHEMA,
+                    spark,
+                )
+                rows, checks, failed, quarantined = _process_table(
+                    spark,
+                    continuous,
+                    continuous_q,
+                    settings,
+                    spec.table,
+                    spec.path,
+                    USGS_CONTINUOUS_CONTRACT,
+                    ["station_id", "parameter_code", "time_utc"],
+                    partial(
+                        run_continuous_checks,
+                        table=spec.table,
+                        expected_unit=spec.expected_unit,
+                    ),
+                    skeleton,
+                    identifier,
+                    check_freshness,
+                )
+                totals[spec.table] += rows
+                dq[spec.table]["checks"] += checks
+                dq[spec.table]["failed"] += failed
+                quarantine_totals[spec.table] += quarantined
+
             daily = _union(daily_frames, USGS_DAILY_SCHEMA, spark)
             meteo = _union(meteo_frames, METEO_HOURLY_SCHEMA, spark)
-            continuous_q = _union(
-                continuous_quarantine, QUARANTINE_CONTINUOUS_SCHEMA, spark
-            )
             daily_q = _union(daily_quarantine, QUARANTINE_USGS_DAILY_SCHEMA, spark)
             meteo_q = _union(meteo_quarantine, QUARANTINE_METEO_SCHEMA, spark)
-
-            rows, checks, failed, quarantined = _process_table(
-                spark,
-                continuous,
-                continuous_q,
-                settings,
-                TABLE_USGS_CONTINUOUS,
-                PATH_USGS_CONTINUOUS,
-                USGS_CONTINUOUS_CONTRACT,
-                ["station_id", "parameter_code", "time_utc"],
-                run_continuous_checks,
-                skeleton,
-                identifier,
-                check_freshness,
-            )
-            totals[TABLE_USGS_CONTINUOUS] += rows
-            dq[TABLE_USGS_CONTINUOUS]["checks"] += checks
-            dq[TABLE_USGS_CONTINUOUS]["failed"] += failed
-            quarantine_totals[TABLE_USGS_CONTINUOUS] += quarantined
 
             rows, checks, failed, quarantined = _process_table(
                 spark,

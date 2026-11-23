@@ -46,8 +46,8 @@ def _paths(settings: SilverSettings, prefix: str, days: list[str]) -> list[str]:
     return [f"{base}/ingest_date={day}/part-000.json" for day in days]
 
 
-def continuous_prefix(station: Station) -> str:
-    return usgs_prefix(station.site_no, "continuous", "00065")
+def continuous_prefix(station: Station, parameter_code: str = "00065") -> str:
+    return usgs_prefix(station.site_no, "continuous", parameter_code)
 
 
 def daily_prefix(station: Station) -> str:
@@ -63,14 +63,15 @@ def read_usgs_continuous(
     settings: SilverSettings,
     station: Station,
     days: list[str],
+    parameter_code: str = "00065",
 ) -> DataFrame:
-    """Read raw USGS gage-height (00065) continuous features."""
+    """Read one raw USGS continuous parameter (00065 or 00060)."""
 
     if not days:
         return spark.createDataFrame([], CONTINUOUS_SOURCE_SCHEMA)
 
     raw = spark.read.schema(USGS_COLLECTION_SCHEMA).json(
-        _paths(settings, continuous_prefix(station), days)
+        _paths(settings, continuous_prefix(station, parameter_code), days)
     )
     properties = (
         raw.withColumn("_file", F.input_file_name())

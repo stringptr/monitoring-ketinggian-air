@@ -25,7 +25,7 @@ from gold.schemas import FEATURE_COLS, TARGET_COLS
 PREFIX = "g1"
 
 
-def definition() -> dict:
+def definition(discharge_source: str = "auto") -> dict:
     return {
         "features": list(FEATURE_COLS),
         "targets": list(TARGET_COLS),
@@ -33,6 +33,7 @@ def definition() -> dict:
         "stage_windows": list(STAGE_WINDOWS),
         "stage_diffs": list(STAGE_DIFFS),
         "discharge_lags": list(DISCHARGE_LAGS),
+        "discharge_source": discharge_source,
         "precip_windows": list(PRECIP_WINDOWS),
         "min_period_ratio": MIN_PERIOD_RATIO,
         "stage_complete_min_samples": STAGE_COMPLETE_MIN_SAMPLES,
@@ -41,9 +42,16 @@ def definition() -> dict:
     }
 
 
-def dataset_version() -> str:
-    """Return a stable identifier for the current dataset definition."""
+def dataset_version(discharge_source: str = "auto") -> str:
+    """Return a stable identifier for the current dataset definition.
 
-    payload = json.dumps(definition(), sort_keys=True, separators=(",", ":"))
+    The discharge source is part of the identity: hourly and daily discharge
+    produce different ``discharge_lag_*`` values even though the column names
+    and windows are identical.
+    """
+
+    payload = json.dumps(
+        definition(discharge_source), sort_keys=True, separators=(",", ":")
+    )
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
     return f"{PREFIX}-{digest}"

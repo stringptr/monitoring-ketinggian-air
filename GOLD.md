@@ -14,7 +14,8 @@ Status implementasi, hasil uji, dan daftar pekerjaan yang belum selesai ada di
 ## Kenapa gold ada
 
 Silver sengaja berhenti pada data bersih dengan resolusi asli: 15 menit untuk
-`00065`, harian untuk `00060`, dan per jam untuk Open-Meteo. Model dan
+`00065` dan `00060`, harian untuk `00060` sebagai pembanding, dan per jam untuk
+Open-Meteo. Model dan
 dashboard membutuhkan satu tabel yang sudah digabung, karena kalau keduanya
 menggabung sendiri-sendiri, definisi jam lengkap dan cara menggeser data bisa
 berbeda.
@@ -61,8 +62,10 @@ jadi dapat dideteksi, dan file staging yang tersisa bisa diperiksa.
 
 `dataset_version` adalah identitas **definisi** dataset, misalnya `g1-3f9c1a2b`.
 Nilainya berasal dari hash daftar fitur, target, jendela, rasio minimal sampel,
-ambang jam lengkap, horizon, dan zona waktu. Versi ini hanya berubah bila
-definisi berubah, bukan setiap hari.
+ambang jam lengkap, horizon, zona waktu, dan sumber debit (`hourly` atau
+`daily`). Sumber debit ikut masuk karena nilai `discharge_lag_*` berbeda meski
+nama kolomnya sama. Versi ini hanya berubah bila definisi berubah, bukan setiap
+hari.
 
 Informasi pemrosesan dicatat terpisah di `gold/dataset_versions`:
 `run_id`, `status`, `data_start_date`, `data_end_date`, `processed_at`, jumlah
@@ -178,12 +181,12 @@ Tanpa object storage (`S3_ENDPOINT_URL` kosong), gold membaca dan menulis di
 
 ## Keputusan dan batasan versi lokal
 
-1. **Debit masih harian.** Pipeline bronze menyimpan `00060` dari koleksi
-   `daily`, sedangkan notebook memakai `00060` continuous 15 menit. Gold
-   mengisi `discharge_model_cfs` dari nilai harian dan menandai
-   `discharge_grain = "daily"`. Setelah `00060` continuous ditambahkan ke
-   bronze, gold otomatis memakai yang per jam (`GOLD_DISCHARGE_SOURCE=auto`)
-   tanpa perubahan skema.
+1. **Debit per jam sebagai fitur.** Pipeline bronze mengambil `00060`
+   continuous 15 menit, dan `00060` daily tetap disimpan sebagai pembanding.
+   Gold mengisi `discharge_model_cfs` dari nilai per jam dan menandai
+   `discharge_grain = "hourly"`. `discharge_daily_cfs` tetap tersedia untuk
+   QC. Sumber debit masuk ke hash `dataset_version`, karena hourly dan daily
+   menghasilkan nilai `discharge_lag_*` yang berbeda.
 2. **Titik embun belum ada.** `dew_point_2m` belum diambil pipeline, jadi
    `dewpoint_c` bernilai `null`. Kolom ini tidak dipakai model, sehingga tidak
    memengaruhi fitur; ia disediakan agar skema tidak berubah nanti.
