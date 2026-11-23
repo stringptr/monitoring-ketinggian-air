@@ -121,6 +121,8 @@ def _process_table(
     skeleton: DataFrame,
     identifier: str,
     check_freshness: bool,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> tuple[int, int, int, int]:
     empty = _is_empty(df)
     if not empty:
@@ -128,7 +130,12 @@ def _process_table(
         if not pdf.empty:
             validate_contract(pdf, contract, table)
         assert_no_duplicates(df, keys, table)
-        write_table(spark, df, settings, path)
+        predicate = (
+            f"ingest_date >= '{start_date}' AND ingest_date <= '{end_date}'"
+            if start_date and end_date
+            else None
+        )
+        write_table(spark, df, settings, path, predicate=predicate)
 
     results = check_fn(df, skeleton, settings, identifier, check_freshness)
     quarantine_results = run_quarantine_check(
@@ -280,6 +287,8 @@ def run_silver(
                     skeleton,
                     identifier,
                     check_freshness,
+                    start_date=chunk_start,
+                    end_date=chunk_end,
                 )
                 totals[spec.table] += rows
                 dq[spec.table]["checks"] += checks
@@ -304,6 +313,8 @@ def run_silver(
                 skeleton,
                 identifier,
                 check_freshness,
+                start_date=chunk_start,
+                end_date=chunk_end,
             )
             totals[TABLE_USGS_DAILY] += rows
             dq[TABLE_USGS_DAILY]["checks"] += checks
@@ -323,6 +334,8 @@ def run_silver(
                 skeleton,
                 identifier,
                 check_freshness,
+                start_date=chunk_start,
+                end_date=chunk_end,
             )
             totals[TABLE_METEO_HOURLY] += rows
             dq[TABLE_METEO_HOURLY]["checks"] += checks
